@@ -24,7 +24,7 @@ def keep_alive():
 # --- TELEGRAM BOT LOGIC ---
 TOKEN = os.environ.get('TOKEN')       # Get from Render Env Variables
 ADMIN_ID = int(os.environ.get('ADMIN_ID', 0)) 
-GROUP_IDS = [-1001234567, -1009876543] # Update these with your group IDs
+GROUP_IDS = [-1002236012208] # Update these with your group IDs
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -61,3 +61,4 @@ if __name__ == '__main__':
     
     print("Bot and Web Server are starting...")
     application.run_polling()
+
