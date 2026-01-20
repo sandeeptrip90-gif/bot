@@ -3,8 +3,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- CONFIGURATION ---
-TOKEN = '8557110719:AAHkm9m6uS_qEp_sgAkT8tYAvMOiXNupV18'  # Put your key here
-ADMIN_ID = 5599766250           # Put your personal Telegram User ID here
+TOKEN = ''  # Put your key here
+ADMIN_ID =            # Put your personal Telegram User ID here
 # List of Group IDs where the bot is an admin
 GROUP_IDS = [-1002236012208] 
 
@@ -45,4 +45,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("broadcast", broadcast))
     
     print("Bot is running... Ready to broadcast any file type.")
+
     app.run_polling()
