@@ -32,6 +32,106 @@ GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -10
 def is_admin(update: Update):
     return update.effective_user.id == ADMIN_ID
 
+# User-Set Settings (Default values)
+config = {
+    "auto_msg_id": None,
+    "from_chat_id": None,
+    "is_active": False,
+    "interval_mins": 120,    # Default 2 hours
+    "night_start": 23,       # 11 PM
+    "night_end": 7           # 7 AM
+}
+
+# --- HELPERS ---
+def is_admin(update: Update):
+    return update.effective_user.id == ADMIN_ID
+
+# --- THE DYNAMIC JOB ---
+async def dynamic_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    if not config["is_active"] or config["auto_msg_id"] is None:
+        return
+
+    # Night Mode Check
+    now = datetime.now().hour
+    if config["night_start"] > config["night_end"]:
+        # Case: Night is 11 PM (23) to 7 AM
+        if now >= config["night_start"] or now < config["night_end"]:
+            return
+    else:
+        # Case: Night is within the same day (e.g. 2 PM to 4 PM)
+        if config["night_start"] <= now < config["night_end"]:
+            return
+
+    for chat_id in GROUP_IDS:
+        try:
+            await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=config["from_chat_id"],
+                message_id=config["auto_msg_id"]
+            )
+            await asyncio.sleep(0.1)
+        except: continue
+
+# --- COMMANDS ---
+
+async def set_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /settings <mins> <night_start_hour> <night_end_hour>"""
+    if not is_admin(update): return
+    try:
+        config["interval_mins"] = int(context.args[0])
+        config["night_start"] = int(context.args[1])
+        config["night_end"] = int(context.args[2])
+        
+        # Reset the timer with new interval
+        current_jobs = context.job_queue.get_jobs_by_name('broadcast_job')
+        for job in current_jobs: job.schedule_removal()
+        
+        context.job_queue.run_repeating(
+            dynamic_broadcast_job, 
+            interval=config["interval_mins"] * 60, 
+            first=10, 
+            name='broadcast_job'
+        )
+        
+        await update.message.reply_text(
+            f"⚙️ **Settings Updated!**\n"
+            f"⏱ Interval: {config['interval_mins']} mins\n"
+            f"🌙 Night Mode: {config['night_start']}:00 to {config['night_end']}:00"
+        )
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: `/settings <minutes> <night_start_hour> <night_end_hour>`\nExample: `/settings 60 22 8` (Every 1 hour, sleep from 10PM to 8AM)")
+
+async def set_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update) or not update.message.reply_to_message:
+        return await update.message.reply_text("❌ Reply to a message with /setauto")
+    
+    config["auto_msg_id"] = update.message.reply_to_message.message_id
+    config["from_chat_id"] = update.message.chat_id
+    config["is_active"] = True
+    await update.message.reply_text("✅ Auto-message set and activated!")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    msg = (
+        "🛠 **Pro Admin Panel**\n\n"
+        "🔧 `/settings 120 23 7` -> Set (Mins, Night Start, Night End)\n"
+        "📝 `/setauto` -> (Reply to msg) Set repeat message\n"
+        "▶️ `/autoon` / ⏸ `/autooff` -> Control auto-sender\n"
+        "📍 `/unpinall` -> Clear all groups\n"
+        "📊 `/status` -> See current configuration"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    st = "ON" if config["is_active"] else "OFF"
+    await update.message.reply_text(
+        f"📊 **Current Status:**\n"
+        f"Active: {st}\n"
+        f"Interval: {config['interval_mins']} mins\n"
+        f"Night Mode: {config['night_start']} to {config['night_end']}"
+    )
+
 # --- COMMANDS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,7 +254,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     keep_alive()
     application = Application.builder().token(TOKEN).build()
-    
+
+    # Initial Job Setup
+    application.job_queue.run_repeating(
+        dynamic_broadcast_job, 
+        interval=config["interval_mins"] * 60, 
+        first=10, 
+        name='broadcast_job'
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("settings", set_settings))
+    application.add_handler(CommandHandler("setauto", set_auto))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("autoon", lambda u, c: (setattr(config, 'is_active', True), u.message.reply_text("Started")))) # Shortened for demo
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("pin", broadcast_and_pin))
@@ -166,6 +279,7 @@ if __name__ == '__main__':
     
     print("Management Bot is running...")
     application.run_polling()
+
 
 
 
