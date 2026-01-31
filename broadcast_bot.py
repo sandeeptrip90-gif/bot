@@ -1,23 +1,15 @@
-import os
-import json
 import asyncio
-import logging
+import os
 from datetime import datetime
-from threading import Thread
-from flask import Flask
-
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler 
-from telegram.error import Forbidden, RetryAfter
-
-# ================= LOGGING =================
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes
 )
-logger = logging.getLogger(__name__)
+from flask import Flask
+from threading import Thread
 
-# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -25,418 +17,330 @@ def home():
     return "Bot is alive"
 
 def run_web():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(
+        host="0.0.0.0",
+        port=8080,
+        debug=False,
+        use_reloader=False
+    )
 
-Thread(target=run_web, daemon=True).start()
+def start_web():
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
 
-# ================= CONFIG =================
+
+
+print("🚀 Bot file loaded successfully")
+
+# =====================================================
+# 🔐 BASIC CONFIG
+# =====================================================
+
 TOKEN = os.environ.get('TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))
-CONFIG_FILE = "config.json"
 
-DEFAULT = {
-    "groups": [],
+# =====================================================
+# 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
+# =====================================================
+
+GROUP_IDS = [-1002236012208, ]
+
+# =====================================================
+# ⚙️ AUTO BROADCAST SETTINGS (IN-MEMORY, NO JSON)
+# =====================================================
+
+config = {
     "auto_msg_id": None,
     "from_chat_id": None,
-    "interval": 120,
+    "is_active": False,
+    "interval_mins": 1,   # default 1 minute
     "night_start": 23,
-    "night_end": 7,
-    "active": False
+    "night_end": 7
 }
 
-def load():
-    if not os.path.exists(CONFIG_FILE):
-        save(DEFAULT)
-    return json.load(open(CONFIG_FILE))
+# =====================================================
+# 🛡 HELPERS
+# =====================================================
 
-def save(data):
-    json.dump(data, open(CONFIG_FILE, "w"), indent=2)
-
-config = load()
-JOB_NAME = "auto_broadcast_job"
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ================== MANUAL GROUP IDS ==================
-MANUAL_GROUP_IDS = [
-   -1002236012208, -1002417345407, -1002330831798, -1001882254820, -1002295951659, -1002350372764, -1002408686476, -1002458796542, -1002459378218, -1001787331133, -1001797945922, -1001843610820, -1002052681893, -1002126246859, -1001509387207, -1001738062150, -1001587346978, -1001829615017, -1002083172621, -1002411884866, -1001567747819, -1002254648501, -1003366623406, -1002283304339, -4557532425
-    # add more group IDs here
-]
-
-config = load_config()
-# Merge manual groups into config (one-time + safe)
-for gid in MANUAL_GROUP_IDS:
-    if gid not in config["groups"]:
-        config["groups"].append(gid)
-
-save_config(config)
-
-
-# ================== FLASK (UPTIME ROBOT) ==================
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "Bot is alive"
-
-def run_web():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
-Thread(target=run_web, daemon=True).start()
-
-# ================== CONFIG ==================
-DEFAULT_CONFIG = {
-    "groups": [],
-    "auto_msg_id": None,
-    "from_chat_id": None,
-    "interval": 120,
-    "night_start": 23,
-    "night_end": 7,
-    "active": False
-}
-
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
-    with open(CONFIG_FILE, "r") as f:
-        return json.load(f)
-
-def save_config(data):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-config = load_config()
-
-# ================== HELPERS ==================
-def is_admin(update: Update):
+def is_admin(update: Update) -> bool:
     return update.effective_user and update.effective_user.id == ADMIN_ID
 
-def night_mode():
+
+def night_mode() -> bool:
     hour = datetime.now().hour
-    ns, ne = config["night_start"], config["night_end"]
-    return (hour >= ns or hour < ne) if ns > ne else (ns <= hour < ne)
+    ns = config["night_start"]
+    ne = config["night_end"]
 
-# ================== AUTO GROUP TRACKER ==================
-async def track_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if not chat:
+    if ns > ne:  # example: 23 to 7
+        return hour >= ns or hour < ne
+    else:
+        return ns <= hour < ne
+
+# =====================================================
+# 🔁 AUTO BROADCAST JOB
+# =====================================================
+
+async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    print("🔁 Auto job triggered")
+
+    if not config["is_active"]:
+        print("⏸ Auto broadcast OFF, skipping")
         return
 
-    # ✅ ONLY allow groups & supergroups
-    if chat.type not in ("group", "supergroup"):
-        return
-
-    new_status = update.my_chat_member.new_chat_member.status
-
-    if new_status in ("member", "administrator"):
-        if chat.id not in config["groups"]:
-            config["groups"].append(chat.id)
-            save_config(config)
-
-    elif new_status in ("left", "kicked"):
-        if chat.id in config["groups"]:
-            config["groups"].remove(chat.id)
-            save_config(config)
-
-# ================== AUTO JOB ==================
-async def auto_job(context: ContextTypes.DEFAULT_TYPE):
-    if not config["active"] or not config["auto_msg_id"]:
+    if not config["auto_msg_id"]:
+        print("⚠️ No auto message set")
         return
 
     if night_mode():
-        logger.info("Night mode active")
+        print("🌙 Night mode active, skipping")
         return
 
-    logger.info("AUTO JOB RUNNING")
-
-    for gid in config["groups"]:
+    for gid in GROUP_IDS:
         try:
-            # 🔒 SAFETY: skip non-group chats (private / channels)
-            chat = await context.bot.get_chat(gid)
-            if chat.type not in ("group", "supergroup"):
-                logger.warning(f"Skipping non-group chat: {gid}")
-                continue
-
+            print(f"📤 Sending message to group {gid}")
             await context.bot.copy_message(
                 chat_id=gid,
                 from_chat_id=config["from_chat_id"],
                 message_id=config["auto_msg_id"]
             )
-
             await asyncio.sleep(0.5)
-
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after)
-
         except Exception as e:
-            logger.warning(f"Auto failed {gid}: {e}")
+            print(f"❌ Failed for {gid}: {e}")
+
+# =====================================================
+# 🛠 COMMANDS
+# =====================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    await help_command(update, context)
 
 
-# ================== JOB RESTART ==================
-async def restart_auto_job(application: Application):
-    jq = application.job_queue
-    if not jq:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
         return
 
-    for job in jq.get_jobs_by_name(JOB_NAME):
-        job.schedule_removal()
-
-    jq.run_repeating(
-        auto_job,
-        interval=config["interval"] * 60,
-        first=5,
-        name=JOB_NAME
+    text = (
+        "🛠 **BOT HELP MENU**\n\n"
+        "♻️ **Auto Broadcast**\n"
+        "/setauto – Reply to a message to set auto message\n"
+        "/autoon – Turn auto broadcast ON\n"
+        "/autooff – Turn auto broadcast OFF\n"
+        "/settings <mins> <nightstart> <nightend>\n"
+        "  Example: /settings 1 0 0\n"
+        "/status – Show auto broadcast status\n\n"
+        "📢 **Manual Broadcast & Manage**\n"
+        "/broadcast – Reply to send message to all groups\n"
+        "/pin – Reply to send & pin message in all groups\n"
+        "/unpinall – Remove all pinned messages\n"
+        "/info – Show group names & member count\n\n"
+        "📊 **Stats & Info**\n"
+        "/stats – Total number of groups\n\n"
+        "🤖 **Notes**\n"
+        "• Groups are MANUALLY added in code\n"
+        "• Bot must be admin in groups\n"
+        "• Supports text, photo, video, voice, files\n"
+        "• Night mode respected automatically"
     )
 
-# ================== COMMANDS ==================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    await update.message.reply_text(
-        "🛠 ADMIN PANEL\n\n"
-        "/setauto (reply)\n"
-        "/autoon /autooff\n"
-        "/settings <mins> <night_start> <night_end>\n"
-        "/status\n\n"
-        "/broadcast (reply)\n"
-        "/stats"
-    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ================= AUTO CONTROLS =================
 
 async def setauto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or not update.message.reply_to_message:
-        return await update.message.reply_text("Reply to a message")
+    if not is_admin(update):
+        return
+
+    print("📝 /setauto command used")
+
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("❌ Reply to a message.")
 
     config["auto_msg_id"] = update.message.reply_to_message.message_id
     config["from_chat_id"] = update.message.chat_id
-    config["active"] = True
-    save_config(config)
+    config["is_active"] = True
 
-    await restart_auto_job(context.application)
-    await update.message.reply_text("✅ Auto message set")
+    print("✅ Auto message configured")
+
+    await update.message.reply_text("✅ Auto message set & activated.")
+
+
 
 async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    config["active"] = True
-    save_config(config)
-    await restart_auto_job(context.application)
-    await update.message.reply_text("▶️ Auto ON")
+    if not is_admin(update):
+        return
+    config["is_active"] = True
+    await update.message.reply_text("▶️ Auto broadcast ON.")
+
 
 async def autooff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    config["active"] = False
-    save_config(config)
-    await update.message.reply_text("⏸ Auto OFF")
+    if not is_admin(update):
+        return
+    config["is_active"] = False
+    await update.message.reply_text("⏸ Auto broadcast OFF.")
+
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
+    if not is_admin(update):
+        return
     try:
-        config["interval"] = int(context.args[0])
+        config["interval_mins"] = int(context.args[0])
         config["night_start"] = int(context.args[1])
         config["night_end"] = int(context.args[2])
-        save_config(config)
-        await restart_auto_job(context.application)
-        await update.message.reply_text("⚙️ Settings updated")
-    except:
+
+        # restart job
+        for job in context.job_queue.jobs():
+            job.schedule_removal()
+
+        context.job_queue.run_repeating(
+            auto_broadcast_job,
+            interval=config["interval_mins"] * 60,
+            first=5
+        )
+
+        await update.message.reply_text("⚙️ Settings updated.")
+    except Exception:
         await update.message.reply_text("Usage: /settings 1 0 0")
 
+
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
+    if not is_admin(update):
+        return
     await update.message.reply_text(
-        f"Active: {config['active']}\n"
-        f"Groups: {len(config['groups'])}\n"
-        f"Interval: {config['interval']} min\n"
+        f"📊 Status: {'ON' if config['is_active'] else 'OFF'}\n"
+        f"Interval: {config['interval_mins']} min\n"
         f"Night: {config['night_start']} → {config['night_end']}"
     )
 
-#--BROADCAST---------
+# ================= MANUAL BROADCAST =================
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or not update.message.reply_to_message:
+    if not is_admin(update):
         return
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("❌ Reply to a message.")
 
     sent = 0
-    for gid in config["groups"]:
+    for gid in GROUP_IDS:
         try:
-            chat = await context.bot.get_chat(gid)
-            if chat.type not in ("group", "supergroup"):
-                continue
-
             await context.bot.copy_message(
-                chat_id=gid,
-                from_chat_id=update.message.reply_to_message.chat_id,
-                message_id=update.message.reply_to_message.message_id
+                gid,
+                update.message.reply_to_message.chat_id,
+                update.message.reply_to_message.message_id
             )
             sent += 1
             await asyncio.sleep(0.5)
+        except Exception:
+            pass
 
-        except Exception as e:
-            logger.warning(f"Broadcast failed {gid}: {e}")
+    await update.message.reply_text(f"✅ Sent to {sent} groups.")
 
-    await update.message.reply_text(f"✅ Broadcast sent to {sent} groups")
-
-
-#---PINNED---------
 
 async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or not update.message.reply_to_message:
+    if not is_admin(update):
         return
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("❌ Reply to a message.")
 
     success = 0
-    for gid in config["groups"]:
+    for gid in GROUP_IDS:
         try:
-            chat = await context.bot.get_chat(gid)
-            if chat.type not in ("group", "supergroup"):
-                continue
-
             msg = await context.bot.copy_message(
-                chat_id=gid,
-                from_chat_id=update.message.reply_to_message.chat_id,
-                message_id=update.message.reply_to_message.message_id
+                gid,
+                update.message.reply_to_message.chat_id,
+                update.message.reply_to_message.message_id
             )
-
-            await context.bot.pin_chat_message(
-                chat_id=gid,
-                message_id=msg.message_id,
-                disable_notification=True
-            )
-
+            await context.bot.pin_chat_message(gid, msg.message_id)
             success += 1
             await asyncio.sleep(0.5)
+        except Exception:
+            pass
 
-        except Exception as e:
-            logger.warning(f"Pin failed {gid}: {e}")
+    await update.message.reply_text(f"📌 Pinned in {success} groups.")
 
-    await update.message.reply_text(f"📌 Pinned in {success} groups")
-
-#-----UNPINNED---------
 
 async def unpinall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
     done = 0
-    for gid in config["groups"]:
+    for gid in GROUP_IDS:
         try:
-            chat = await context.bot.get_chat(gid)
-            if chat.type not in ("group", "supergroup"):
-                continue
-
-            await context.bot.unpin_all_chat_messages(chat_id=gid)
+            await context.bot.unpin_all_chat_messages(gid)
             done += 1
             await asyncio.sleep(0.3)
+        except Exception:
+            pass
 
-        except Exception as e:
-            logger.warning(f"Unpin failed {gid}: {e}")
+    await update.message.reply_text(f"🧹 Unpinned in {done} groups.")
 
-    await update.message.reply_text(f"🧹 Unpinned all messages in {done} groups")
-
-
-#-----INFO-------
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
     text = "📊 Group Info\n\n"
-    for gid in config["groups"]:
+    for gid in GROUP_IDS:
         try:
             chat = await context.bot.get_chat(gid)
-            if chat.type not in ("group", "supergroup"):
-                continue
-
             members = await context.bot.get_chat_member_count(gid)
             text += f"• {chat.title}: {members}\n"
-
-        except Exception as e:
+        except Exception:
             text += f"• {gid}: ❌\n"
 
     await update.message.reply_text(text)
 
-#----STATS-------
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    await update.message.reply_text(
-        f"📊 Total groups: {len(config['groups'])}"
-    )
+    await update.message.reply_text(f"📊 Total groups: {len(GROUP_IDS)}")
 
+# =====================================================
+# 🚀 MAIN
+# =====================================================
 
-#-----HELP------
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-
-    help_text = (
-        "🛠 **BOT HELP MENU**\n\n"
-
-        "♻️ **Auto Broadcast**\n"
-        "/setauto – Reply to a message to set auto message\n"
-        "/autoon – Turn auto broadcast ON\n"
-        "/autooff – Turn auto broadcast OFF\n"
-        "/settings <mins> <night_start> <night_end>\n"
-        "  Example: /settings 1 0 0\n"
-        "/status – Show auto broadcast status\n\n"
-
-        "📢 **Manual Broadcast & Manage**\n"
-        "/broadcast – Reply to send message to all groups\n"
-        "/pin – Reply to send & pin message in all groups\n"
-        "/unpinall – Remove all pinned messages\n"
-        "/info – Show group names & member count\n\n"
-
-        "📊 **Stats & Info**\n"
-        "/stats – Total number of groups\n\n"
-
-        "🤖 **Notes**\n"
-        "• Bot auto-detects groups\n"
-        "• Bot must be admin in groups\n"
-        "• Supports text, photo, video, voice, files\n"
-        "• Night mode respected automatically"
-    )
-
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-
-# ================== MAIN ==================
 def main():
-    application = Application.builder().token(TOKEN).build()
 
-    # 🔹 AUTO GROUP DETECTION
-    application.add_handler(
-        ChatMemberHandler(track_groups, ChatMemberHandler.MY_CHAT_MEMBER)
+    start_web()
+    print("🌐 Web server started")
+
+    print("⚙️ Initializing bot...")
+
+    app = Application.builder().token(TOKEN).build()
+
+    print("✅ Bot connected to Telegram")
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("setauto", setauto))
+    app.add_handler(CommandHandler("autoon", autoon))
+    app.add_handler(CommandHandler("autooff", autooff))
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("status", status))
+
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("pin", pin))
+    app.add_handler(CommandHandler("unpinall", unpinall))
+    app.add_handler(CommandHandler("info", info))
+    app.add_handler(CommandHandler("stats", stats))
+
+    print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
+    print(f"📌 Group IDs: {GROUP_IDS}")
+
+    app.job_queue.run_repeating(
+        auto_broadcast_job,
+        interval=config["interval_mins"] * 60,
+        first=10
     )
 
-    # 🔹 COMMAND HANDLERS (REGISTER ONCE ONLY)
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setauto", setauto))
-    application.add_handler(CommandHandler("autoon", autoon))
-    application.add_handler(CommandHandler("autooff", autooff))
-    application.add_handler(CommandHandler("settings", settings))
-    application.add_handler(CommandHandler("status", status))
-
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("broadcast", broadcast))
-    application.add_handler(CommandHandler("pin", pin))
-    application.add_handler(CommandHandler("unpinall", unpinall))
-    application.add_handler(CommandHandler("info", info))
-    application.add_handler(CommandHandler("stats", stats))
-
-    # 🔹 AUTO JOB START (JobQueue)
-    if application.job_queue:
-        application.job_queue.run_repeating(
-            auto_job,
-            interval=config["interval"] * 60,
-            first=10,
-            name=JOB_NAME
-        )
-
-    # 🔹 START BOT
-    application.run_polling(
-        drop_pending_updates=True,
-        close_loop=False
-    )
+    print("🤖 Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
 
+# 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
-
