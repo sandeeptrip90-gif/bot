@@ -58,6 +58,21 @@ JOB_NAME = "auto_broadcast_job"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ================== MANUAL GROUP IDS ==================
+MANUAL_GROUP_IDS = [
+   -1002236012208, -1002417345407, -1002330831798, -1001882254820, -1002295951659, -1002350372764, -1002408686476, -1002458796542, -1002459378218, -1001787331133, -1001797945922, -1001843610820, -1002052681893, -1002126246859, -1001509387207, -1001738062150, -1001587346978, -1001829615017, -1002083172621, -1002411884866, -1001567747819, -1002254648501, -1003366623406, -1002283304339, -4557532425
+    # add more group IDs here
+]
+
+config = load_config()
+# Merge manual groups into config (one-time + safe)
+for gid in MANUAL_GROUP_IDS:
+    if gid not in config["groups"]:
+        config["groups"].append(gid)
+
+save_config(config)
+
+
 # ================== FLASK (UPTIME ROBOT) ==================
 app = Flask(__name__)
 
@@ -424,3 +439,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
