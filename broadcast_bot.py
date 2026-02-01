@@ -81,8 +81,13 @@ def night_mode() -> bool:
 # 🔁 AUTO BROADCAST JOB
 # =====================================================
 
+# =====================================================
+# 🔁 AUTO BROADCAST JOB (Modified with Logging)
+# =====================================================
+
 async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
-    print("🔁 Auto job triggered")
+    # Timing check ke liye log
+    print(f"🔁 Auto job triggered at: {datetime.now().strftime('%H:%M:%S')}")
 
     if not config["is_active"]:
         print("⏸ Auto broadcast OFF, skipping")
@@ -96,9 +101,9 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         print("🌙 Night mode active, skipping")
         return
 
+    print(f"📤 Sending message to {len(GROUP_IDS)} groups...")
     for gid in GROUP_IDS:
         try:
-            print(f"📤 Sending message to group {gid}")
             await context.bot.copy_message(
                 chat_id=gid,
                 from_chat_id=config["from_chat_id"],
@@ -172,9 +177,32 @@ async def setauto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
-    config["is_active"] = True
-    await update.message.reply_text("▶️ Auto broadcast ON.")
 
+    # 1. State update
+    config["is_active"] = True
+
+    # 2. CLEAR PREVIOUS JOBS (Safety check to prevent overlap)
+    job_name = 'auto_broadcast'
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+        print(f"Log: Cleaning up existing job '{job_name}' before turning ON.")
+
+    # 3. FRESH START
+    # first=10 means message will start sending 10 seconds after turning ON
+    context.job_queue.run_repeating(
+        auto_broadcast_job,
+        interval=config["interval_mins"] * 60,
+        first=10, 
+        name=job_name
+    )
+
+    await update.message.reply_text(
+        f"▶️ **Auto Broadcast: ON**\n"
+        f"⏱ Interval: {config['interval_mins']} min\n"
+        f"🔄 Naya timer fresh start kar diya gaya hai."
+    )
+    print(f"Log: Auto broadcast turned ON and timer synchronized.")
 
 async def autooff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -184,34 +212,43 @@ async def autooff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
+    if not is_admin(update): return
     try:
-        # 1. Nayi values set karein
-        config["interval_mins"] = int(context.args[0])
+        # 1. Nayi values store karein
+        new_interval = int(context.args[0])
+        config["interval_mins"] = new_interval
         config["night_start"] = int(context.args[1])
         config["night_end"] = int(context.args[2])
 
-        # 2. Purane saare jobs ko 'name' se dhund kar hatayein
-        current_jobs = context.job_queue.get_jobs_by_name('auto_broadcast')
+        # 2. CLEAR ALL PREVIOUS JOBS (Timing Fix)
+        # Hum specifically 'auto_broadcast' name wale saare jobs ko delete karenge
+        job_name = 'auto_broadcast'
+        current_jobs = context.job_queue.get_jobs_by_name(job_name)
+        
         for job in current_jobs:
             job.schedule_removal()
+            print(f"Log: Old job '{job_name}' removed to prevent overlap.")
 
-        # 3. Naya job start karein (Interval fix)
+        # 3. START FRESH JOB
+        # 'first=new_interval * 60' karne se naya message turant nahi, 
+        # balki agle interval par hi jayega (Overlap protection)
         context.job_queue.run_repeating(
             auto_broadcast_job,
             interval=config["interval_mins"] * 60,
-            first=10, # 10 seconds baad pehla message jayega
-            name='auto_broadcast' # Name dena zaroori hai track karne ke liye
+            first=config["interval_mins"] * 60, 
+            name=job_name
         )
 
         await update.message.reply_text(
-            f"⚙️ **Settings Updated!**\n"
-            f"⏱ Ab har {config['interval_mins']} minute mein message jayega.\n"
-            f"🌙 Night Mode: {config['night_start']} se {config['night_end']} tak."
+            f"⚙️ **Settings Synced!**\n"
+            f"⏱ Interval: {config['interval_mins']} min\n"
+            f"🌙 Night: {config['night_start']} to {config['night_end']}\n"
+            f"\nPurane saare timers clear kar diye gaye hain."
         )
+        print(f"Log: New stable timer set for {config['interval_mins']} minutes.")
+
     except (IndexError, ValueError):
-        await update.message.reply_text("❌ Usage: `/settings 56 23 7` (Minutes NightStart NightEnd)")
+        await update.message.reply_text("❌ Usage: `/settings 56 23 7`")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,10 +384,13 @@ def main():
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
 
+    # 🔥 FIX: Initial job ko bhi name dena zaroori hai
+    job_name = 'auto_broadcast'
     app.job_queue.run_repeating(
         auto_broadcast_job,
         interval=config["interval_mins"] * 60,
-        first=10
+        first=10,
+        name=job_name # Yeh name settings mein kaam aayega
     )
 
     print("🤖 Bot is running...")
@@ -360,5 +400,6 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
+
 
 
