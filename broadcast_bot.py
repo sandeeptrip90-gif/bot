@@ -187,33 +187,49 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     try:
+        # 1. Nayi values set karein
         config["interval_mins"] = int(context.args[0])
         config["night_start"] = int(context.args[1])
         config["night_end"] = int(context.args[2])
 
-        # restart job
-        for job in context.job_queue.jobs():
+        # 2. Purane saare jobs ko 'name' se dhund kar hatayein
+        current_jobs = context.job_queue.get_jobs_by_name('auto_broadcast')
+        for job in current_jobs:
             job.schedule_removal()
 
+        # 3. Naya job start karein (Interval fix)
         context.job_queue.run_repeating(
             auto_broadcast_job,
             interval=config["interval_mins"] * 60,
-            first=5
+            first=10, # 10 seconds baad pehla message jayega
+            name='auto_broadcast' # Name dena zaroori hai track karne ke liye
         )
 
-        await update.message.reply_text("⚙️ Settings updated.")
-    except Exception:
-        await update.message.reply_text("Usage: /settings 1 0 0")
+        await update.message.reply_text(
+            f"⚙️ **Settings Updated!**\n"
+            f"⏱ Ab har {config['interval_mins']} minute mein message jayega.\n"
+            f"🌙 Night Mode: {config['night_start']} se {config['night_end']} tak."
+        )
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: `/settings 56 23 7` (Minutes NightStart NightEnd)")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    await update.message.reply_text(
-        f"📊 Status: {'ON' if config['is_active'] else 'OFF'}\n"
-        f"Interval: {config['interval_mins']} min\n"
-        f"Night: {config['night_start']} → {config['night_end']}"
+    if not is_admin(update): return
+    
+    active_jobs = context.job_queue.get_jobs_by_name('auto_broadcast')
+    job_status = "RUNNING" if active_jobs else "STOPPED/NOT SET"
+    
+    msg = (
+        f"📊 **Current Bot Status**\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ Auto-Send: {'ON' if config['is_active'] else 'OFF'}\n"
+        f"⏱ Interval: {config['interval_mins']} min\n"
+        f"🌙 Night: {config['night_start']} to {config['night_end']}\n"
+        f"🤖 Job Queue: {job_status}\n"
+        f"✉️ Message Set: {'YES' if config['auto_msg_id'] else 'NO'}"
     )
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ================= MANUAL BROADCAST =================
 
@@ -344,4 +360,5 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
+
 
