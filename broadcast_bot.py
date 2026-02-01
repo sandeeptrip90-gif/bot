@@ -10,19 +10,24 @@ from telegram.ext import (
 from flask import Flask
 from threading import Thread
 
-app = Flask(__name__)
+# Use a distinct name for the Flask app to avoid shadowing the Telegram
+# Application object later named `telegram_app`.
+flask_app = Flask(__name__)
 
-@app.route("/")
+
+@flask_app.route("/")
 def home():
     return "Bot is alive"
 
+
 def run_web():
-    app.run(
+    flask_app.run(
         host="0.0.0.0",
         port=8080,
         debug=False,
         use_reloader=False
     )
+
 
 def start_web():
     t = Thread(target=run_web)
@@ -37,8 +42,8 @@ print("🚀 Bot file loaded successfully")
 # 🔐 BASIC CONFIG
 # =====================================================
 
-TOKEN = os.environ.get('TOKEN')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))
+TOKEN = "8218945392:AAFI4b2_Yo9wXhQJFCL63vw8FHpOeefkHPU"
+ADMIN_ID = 5599766250
 
 # =====================================================
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
@@ -183,19 +188,23 @@ async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. CLEAR PREVIOUS JOBS (Safety check to prevent overlap)
     job_name = 'auto_broadcast'
-    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    # Use the Application job queue explicitly to avoid contexts where
+    # `context.job_queue` might not point to the expected queue.
+    current_jobs = context.application.job_queue.get_jobs_by_name(job_name)
     for job in current_jobs:
         job.schedule_removal()
         print(f"Log: Cleaning up existing job '{job_name}' before turning ON.")
 
     # 3. FRESH START
     # first=10 means message will start sending 10 seconds after turning ON
-    context.job_queue.run_repeating(
+    job = context.application.job_queue.run_repeating(
         auto_broadcast_job,
         interval=config["interval_mins"] * 60,
-        first=10, 
+        first=10,
         name=job_name
     )
+
+    print(f"Log: Scheduled job '{job_name}' every {config['interval_mins']} minute(s). Next run in ~10s.")
 
     await update.message.reply_text(
         f"▶️ **Auto Broadcast: ON**\n"
@@ -223,21 +232,23 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2. CLEAR ALL PREVIOUS JOBS (Timing Fix)
         # Hum specifically 'auto_broadcast' name wale saare jobs ko delete karenge
         job_name = 'auto_broadcast'
-        current_jobs = context.job_queue.get_jobs_by_name(job_name)
-        
+        # Use application job queue explicitly
+        current_jobs = context.application.job_queue.get_jobs_by_name(job_name)
+
         for job in current_jobs:
             job.schedule_removal()
             print(f"Log: Old job '{job_name}' removed to prevent overlap.")
 
-        # 3. START FRESH JOB
-        # 'first=new_interval * 60' karne se naya message turant nahi, 
-        # balki agle interval par hi jayega (Overlap protection)
-        context.job_queue.run_repeating(
+        # START FRESH JOB
+        # Starting the job after one full interval avoids immediate duplicate sends.
+        job = context.application.job_queue.run_repeating(
             auto_broadcast_job,
             interval=config["interval_mins"] * 60,
-            first=config["interval_mins"] * 60, 
+            first=config["interval_mins"] * 60,
             name=job_name
         )
+
+        print(f"Log: New job '{job_name}' scheduled every {config['interval_mins']} minute(s). Next run ~{config['interval_mins']}min.")
 
         await update.message.reply_text(
             f"⚙️ **Settings Synced!**\n"
@@ -254,7 +265,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     
-    active_jobs = context.job_queue.get_jobs_by_name('auto_broadcast')
+    active_jobs = context.application.job_queue.get_jobs_by_name('auto_broadcast')
     job_status = "RUNNING" if active_jobs else "STOPPED/NOT SET"
     
     msg = (
@@ -362,39 +373,39 @@ def main():
     print("🌐 Web server started")
 
     print("⚙️ Initializing bot...")
-
-    app = Application.builder().token(TOKEN).build()
+    # Create Telegram Application instance and keep it separate from Flask
+    telegram_app = Application.builder().token(TOKEN).build()
 
     print("✅ Bot connected to Telegram")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("setauto", setauto))
-    app.add_handler(CommandHandler("autoon", autoon))
-    app.add_handler(CommandHandler("autooff", autooff))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("status", status))
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("setauto", setauto))
+    telegram_app.add_handler(CommandHandler("autoon", autoon))
+    telegram_app.add_handler(CommandHandler("autooff", autooff))
+    telegram_app.add_handler(CommandHandler("settings", settings))
+    telegram_app.add_handler(CommandHandler("status", status))
 
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("pin", pin))
-    app.add_handler(CommandHandler("unpinall", unpinall))
-    app.add_handler(CommandHandler("info", info))
-    app.add_handler(CommandHandler("stats", stats))
+    telegram_app.add_handler(CommandHandler("broadcast", broadcast))
+    telegram_app.add_handler(CommandHandler("pin", pin))
+    telegram_app.add_handler(CommandHandler("unpinall", unpinall))
+    telegram_app.add_handler(CommandHandler("info", info))
+    telegram_app.add_handler(CommandHandler("stats", stats))
 
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
 
-    # 🔥 FIX: Initial job ko bhi name dena zaroori hai
+    # Initial job with a name so it can be managed later
     job_name = 'auto_broadcast'
-    app.job_queue.run_repeating(
+    telegram_app.job_queue.run_repeating(
         auto_broadcast_job,
         interval=config["interval_mins"] * 60,
         first=10,
-        name=job_name # Yeh name settings mein kaam aayega
+        name=job_name
     )
 
     print("🤖 Bot is running...")
-    app.run_polling(drop_pending_updates=True)
+    telegram_app.run_polling(drop_pending_updates=True)
 
 
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
