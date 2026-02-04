@@ -78,7 +78,7 @@ def night_mode() -> bool:
     ne = config["night_end"]
 
     if ns > ne:  # example: 23 to 7
-        return hour >= ns or hour < ne
+        return hour >= ns or hour <= (ne - 1)
     else:
         return ns <= hour < ne
 
@@ -92,7 +92,9 @@ def night_mode() -> bool:
 
 async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     # Timing check ke liye log
-    print(f"🔁 Auto job triggered at: {datetime.now().strftime('%H:%M:%S')}")
+    now = datetime.now()
+    hour = now.hour
+    print(f"🔁 Auto job triggered at: {now.strftime('%H:%M:%S')} | Night Start: {config['night_start']}, Night End: {config['night_end']}")
 
     if not config["is_active"]:
         print("⏸ Auto broadcast OFF, skipping")
@@ -102,7 +104,10 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         print("⚠️ No auto message set")
         return
 
-    if night_mode():
+    is_night = night_mode()
+    print(f"📊 Current hour: {hour} | Night Mode: {is_night}")
+    
+    if is_night:
         print("🌙 Night mode active, skipping")
         return
 
@@ -411,6 +416,5 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
-
 
 
