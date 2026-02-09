@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -54,19 +54,34 @@ GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -10
 # =====================================================
 # ⚙️ AUTO BROADCAST SETTINGS (IN-MEMORY, NO JSON)
 
+
 config = {
-    "auto_msg_id": None,
-    "from_chat_id": None,
-    "is_active": False,
-    "interval_mins": 1,   # default 1 minute
     "night_start": 23,
     "night_end": 7
 }
 
-# How many parallel staggered jobs to create
+# How many independent jobs to support
 JOB_COUNT = 5
-# Per-job runtime tracking
+
+# Per-job storage template: jobs are keyed `job_1`..`job_5`.
+# Each job stores: message_id, from_chat_id, interval_mins, is_active, last_run, next_run, last_status
 config.setdefault("jobs", {})
+for i in range(1, JOB_COUNT + 1):
+    name = f"job_{i}"
+    config["jobs"].setdefault(name, {
+        "message_id": None,
+        "from_chat_id": None,
+        "interval_mins": None,
+        "is_active": False,
+        "last_run": None,
+        "next_run": None,
+        "last_status": "stopped"
+    })
+
+# =====================================================
+# Time helpers (IST)
+def get_ist_now() -> datetime:
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 # Developer notes — How to create new jobs
 # Option A — Use the built-in staggered auto jobs:
@@ -88,12 +103,18 @@ def is_admin(update: Update) -> bool:
 
 
 def night_mode() -> bool:
-    hour = datetime.now().hour
+    # Use IST for all night checks
+    ist = get_ist_now()
+    hour = ist.hour
     ns = config["night_start"]
     ne = config["night_end"]
 
-    if ns > ne:  # example: 23 to 7
-        return hour >= ns or hour <= (ne - 1)
+    # Disabled if both set to 0
+    if ns == 0 and ne == 0:
+        return False
+
+    if ns > ne:  # crosses midnight, e.g., 23 -> 7
+        return hour >= ns or hour < ne
     else:
         return ns <= hour < ne
 
@@ -107,7 +128,8 @@ def night_mode() -> bool:
 
 async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     # Timing check ke liye log
-    now = datetime.now()
+    ist = get_ist_now()
+    now = ist
     hour = now.hour
     # Determine job name if available
     job_name = None
@@ -116,65 +138,61 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         job_name = None
 
-    print(f"🔁 Auto job triggered at: {now.strftime('%Y-%m-%d %H:%M:%S')} | job={job_name} | Night Start: {config['night_start']}, Night End: {config['night_end']}")
-
-    if not config["is_active"]:
-        print("⏸ Auto broadcast OFF, skipping")
-        if job_name:
-            config["jobs"].setdefault(job_name, {})
-            config["jobs"][job_name]["last_run"] = now.isoformat()
-            config["jobs"][job_name]["last_status"] = "skipped:global-off"
+    print(f"🔁 Auto job triggered (IST) at: {now.strftime('%Y-%m-%d %H:%M:%S')} | job={job_name} | Night Start: {config['night_start']}, Night End: {config['night_end']}")
+    # job-specific logic: use message stored for this job
+    record = config.get("jobs", {}).get(job_name)
+    if not record:
+        print(f"⚠️ No config record for {job_name}, skipping")
         return
 
-    if not config["auto_msg_id"]:
-        print("⚠️ No auto message set")
-        if job_name:
-            config["jobs"].setdefault(job_name, {})
-            config["jobs"][job_name]["last_run"] = now.isoformat()
-            config["jobs"][job_name]["last_status"] = "skipped:no-msg"
+    # check active and message
+    if not record.get("is_active"):
+        print(f"⏸ {job_name} is inactive, skipping")
+        record["last_run"] = now.isoformat()
+        record["last_status"] = "skipped:inactive"
+        return
+
+    if not record.get("message_id") or not record.get("from_chat_id"):
+        print(f"⚠️ {job_name} has no message configured, skipping")
+        record["last_run"] = now.isoformat()
+        record["last_status"] = "skipped:no-msg"
         return
 
     is_night = night_mode()
-    print(f"📊 Current hour: {hour} | Night Mode: {is_night}")
-    
+    print(f"📊 Current IST hour: {hour} | Night Mode: {is_night}")
     if is_night:
-        print("🌙 Night mode active, skipping")
-        if job_name:
-            config["jobs"].setdefault(job_name, {})
-            config["jobs"][job_name]["last_run"] = now.isoformat()
-            config["jobs"][job_name]["last_status"] = "skipped:night"
+        print(f"🌙 {job_name} skipped due to night mode")
+        record["last_run"] = now.isoformat()
+        record["last_status"] = "skipped:night"
         return
 
-    print(f"📤 Sending message to {len(GROUP_IDS)} groups...")
-    # record start
-    if job_name:
-        config["jobs"].setdefault(job_name, {})
-        config["jobs"][job_name]["last_run"] = now.isoformat()
-        config["jobs"][job_name]["last_status"] = "running"
+    print(f"📤 {job_name}: Sending message to {len(GROUP_IDS)} groups...")
+    record["last_run"] = now.isoformat()
+    record["last_status"] = "running"
+
     for gid in GROUP_IDS:
         try:
             await context.bot.copy_message(
                 chat_id=gid,
-                from_chat_id=config["from_chat_id"],
-                message_id=config["auto_msg_id"]
+                from_chat_id=record.get("from_chat_id"),
+                message_id=record.get("message_id")
             )
             await asyncio.sleep(0.5)
         except Exception as e:
             print(f"❌ Failed for {gid}: {e}")
 
-    # after sending, try to record next run time if available
-    if job_name:
-        try:
-            job_list = context.application.job_queue.get_jobs_by_name(job_name)
-            if job_list:
-                job = job_list[0]
-                next_rt = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
-                config["jobs"][job_name]["next_run"] = next_rt.isoformat() if next_rt else None
-                # store interval if present
-                interval = getattr(job, 'interval', None)
-                config["jobs"][job_name]["interval_secs"] = interval if interval else config.get("interval_mins", 0) * 60
-        except Exception:
-            pass
+    # update next run if job object available
+    try:
+        job_list = context.application.job_queue.get_jobs_by_name(job_name)
+        if job_list:
+            job = job_list[0]
+            next_rt = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
+            record["next_run"] = next_rt.isoformat() if next_rt else None
+            interval = getattr(job, 'interval', None)
+            if interval:
+                record["interval_mins"] = int(interval / 60)
+    except Exception:
+        pass
 
 # =====================================================
 # 🛠 COMMANDS
@@ -236,6 +254,66 @@ async def setauto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Auto message set & activated.")
 
 
+async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <mins>")
+    try:
+        job_id = int(context.args[0])
+        mins = int(context.args[1])
+    except Exception:
+        return await update.message.reply_text("❌ Usage: /setjob <id> <mins> (id 1..5)")
+
+    if job_id < 1 or job_id > JOB_COUNT:
+        return await update.message.reply_text(f"❌ Job id must be between 1 and {JOB_COUNT}")
+
+    name = f"job_{job_id}"
+    # store message
+    config["jobs"][name]["message_id"] = update.message.reply_to_message.message_id
+    config["jobs"][name]["from_chat_id"] = update.message.chat_id
+    config["jobs"][name]["interval_mins"] = mins
+    config["jobs"][name]["is_active"] = True
+    config["jobs"][name]["last_status"] = "scheduled"
+
+    # remove existing job if any
+    existing = context.application.job_queue.get_jobs_by_name(name)
+    for j in existing:
+        j.schedule_removal()
+
+    # schedule repeating job
+    interval_secs = mins * 60
+    context.application.job_queue.run_repeating(
+        auto_broadcast_job,
+        interval=interval_secs,
+        first=10,
+        name=name
+    )
+
+    await update.message.reply_text(f"✅ Job {job_id} set: every {mins} minute(s). Will use the replied message.")
+
+
+async def stopjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    try:
+        job_id = int(context.args[0])
+    except Exception:
+        return await update.message.reply_text("❌ Usage: /stopjob <id>")
+    if job_id < 1 or job_id > JOB_COUNT:
+        return await update.message.reply_text(f"❌ Job id must be between 1 and {JOB_COUNT}")
+
+    name = f"job_{job_id}"
+    current_jobs = context.application.job_queue.get_jobs_by_name(name)
+    for j in current_jobs:
+        j.schedule_removal()
+    # mark inactive
+    config["jobs"][name]["is_active"] = False
+    config["jobs"][name]["last_status"] = "stopped"
+
+    await update.message.reply_text(f"⏹ Job {job_id} stopped and removed.")
+
+
 
 async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -253,33 +331,24 @@ async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job.schedule_removal()
             print(f"Log: Cleaning up existing job '{name}' before turning ON.")
 
-    # 3. FRESH START — create JOB_COUNT repeating jobs staggered across the interval
-    interval_secs = config["interval_mins"] * 60
+    # 3. FRESH START — schedule any configured jobs (per-job intervals)
     for i in range(1, JOB_COUNT + 1):
-        # stagger by distributing starts across the interval; add small base offset
-        first = 10 + int((i - 1) * (interval_secs / JOB_COUNT))
-        name = f"{job_base}_{i}"
-        context.application.job_queue.run_repeating(
-            auto_broadcast_job,
-            interval=interval_secs,
-            first=first,
-            name=name
-        )
-        # initialize tracking record
-        config["jobs"].setdefault(name, {})
-        config["jobs"][name]["interval_secs"] = interval_secs
-        config["jobs"][name]["next_run"] = None
-        config["jobs"][name]["last_run"] = None
-        config["jobs"][name]["last_status"] = "scheduled"
+        name = f"job_{i}"
+        rec = config["jobs"].get(name)
+        if rec and rec.get("is_active") and rec.get("interval_mins"):
+            interval_secs = int(rec["interval_mins"]) * 60
+            # remove existing
+            for j in context.application.job_queue.get_jobs_by_name(name):
+                j.schedule_removal()
+            context.application.job_queue.run_repeating(
+                auto_broadcast_job,
+                interval=interval_secs,
+                first=10,
+                name=name
+            )
 
-    print(f"Log: Scheduled {JOB_COUNT} staggered jobs every {config['interval_mins']} minute(s). Next run in ~10s for job 1.")
-
-    await update.message.reply_text(
-        f"▶️ **Auto Broadcast: ON**\n"
-        f"⏱ Interval: {config['interval_mins']} min\n"
-        f"🔄 Naya timer fresh start kar diya gaya hai."
-    )
-    print(f"Log: Auto broadcast turned ON and timer synchronized.")
+    await update.message.reply_text("▶️ Auto broadcast: started configured jobs.")
+    print("Log: Auto broadcast jobs started where configured.")
 
 async def autooff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -302,94 +371,57 @@ async def autooff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
+    if not is_admin(update):
+        return
     try:
-        # 1. Nayi values store karein
-        new_interval = int(context.args[0])
-        config["interval_mins"] = new_interval
-        config["night_start"] = int(context.args[1])
-        config["night_end"] = int(context.args[2])
-
-        # 2. CLEAR ALL PREVIOUS JOBS (Timing Fix)
-        job_base = 'auto_broadcast'
-        for i in range(1, JOB_COUNT + 1):
-            name = f"{job_base}_{i}"
-            current_jobs = context.application.job_queue.get_jobs_by_name(name)
-            for job in current_jobs:
-                job.schedule_removal()
-                print(f"Log: Old job '{name}' removed to prevent overlap.")
-
-        # START FRESH JOBS — staggered across one interval
-        interval_secs = config["interval_mins"] * 60
-        for i in range(1, JOB_COUNT + 1):
-            # start times distributed within the next full interval
-            first = int((i / JOB_COUNT) * interval_secs)
-            name = f"{job_base}_{i}"
-            context.application.job_queue.run_repeating(
-                auto_broadcast_job,
-                interval=interval_secs,
-                first=first,
-                name=name
-            )
-            # initialize tracking record
-            config["jobs"].setdefault(name, {})
-            config["jobs"][name]["interval_secs"] = interval_secs
-            config["jobs"][name]["next_run"] = None
-            config["jobs"][name]["last_run"] = None
-            config["jobs"][name]["last_status"] = "scheduled"
-
-        print(f"Log: Scheduled {JOB_COUNT} staggered jobs every {config['interval_mins']} minute(s). Next run in ~{config['interval_mins']}min window.")
-
-        await update.message.reply_text(
-            f"⚙️ **Settings Synced!**\n"
-            f"⏱ Interval: {config['interval_mins']} min\n"
-            f"🌙 Night: {config['night_start']} to {config['night_end']}\n"
-            f"\nPurane saare timers clear kar diye gaye hain."
-        )
-        print(f"Log: New stable timer set for {config['interval_mins']} minutes.")
-
+        # expect two args: night_start night_end (hours 0-23), both 0 disables night mode
+        ns = int(context.args[0])
+        ne = int(context.args[1])
+        if not (0 <= ns <= 23 and 0 <= ne <= 23):
+            raise ValueError
+        config["night_start"] = ns
+        config["night_end"] = ne
+        await update.message.reply_text(f"⚙️ Night mode set: {ns}:00 to {ne}:00 (IST).")
+        print(f"Log: Night settings updated to {ns} -> {ne} (IST)")
     except (IndexError, ValueError):
-        await update.message.reply_text("❌ Usage: `/settings 56 23 7`")
+        await update.message.reply_text("❌ Usage: /settings <night_start_hour> <night_end_hour>  (0-23), use 0 0 to disable")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    
-    job_base = 'auto_broadcast'
+    ist = get_ist_now()
 
     lines = []
-    lines.append("📊 **Current Bot Status**")
+    lines.append("📊 **Current Bot Status (IST)**")
     lines.append("━━━━━━━━━━━━━━━")
-    lines.append(f"✅ Auto-Send: {'ON' if config['is_active'] else 'OFF'}")
-    lines.append(f"⏱ Interval (mins): {config['interval_mins']}")
-    lines.append(f"🌙 Night: {config['night_start']} to {config['night_end']}")
-    lines.append(f"✉️ Message Set: {'YES' if config['auto_msg_id'] else 'NO'}")
+    lines.append(f"🕒 Current IST time: {ist.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"🌙 Night: {config['night_start']} to {config['night_end']} (0 0 = disabled)")
     lines.append("")
     lines.append("🔁 Jobs:")
 
     for i in range(1, JOB_COUNT + 1):
-        name = f"{job_base}_{i}"
+        name = f"job_{i}"
         jobs = context.application.job_queue.get_jobs_by_name(name)
         exists = len(jobs) > 0
-        next_run = None
-        interval_secs = None
-        if exists:
-            job = jobs[0]
-            next_run = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
-            interval_secs = getattr(job, 'interval', None)
 
         record = config.get("jobs", {}).get(name, {})
         last_run = record.get("last_run")
         last_status = record.get("last_status", "-")
-        # prefer job object next_run if present
-        next_run_str = next_run.isoformat() if next_run else (record.get("next_run") or "N/A")
-        interval_str = f"{int(interval_secs)}s" if interval_secs else (f"{int(record.get('interval_secs',0))}s" if record.get('interval_secs') else "N/A")
+        interval_mins = record.get("interval_mins")
+        msg_id = record.get("message_id")
 
-        lines.append(f"• {name}: {'RUNNING' if exists else 'NOT RUNNING'}")
+        next_run_str = "N/A"
+        if exists:
+            job = jobs[0]
+            nr = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
+            next_run_str = nr.isoformat() if nr else "N/A"
+
+        lines.append(f"• Job {i}: {'RUNNING' if exists else 'NOT RUNNING'}")
+        lines.append(f"  - Interval: {interval_mins or 'N/A'} min")
         lines.append(f"  - Next run: {next_run_str}")
-        lines.append(f"  - Interval: {interval_str}")
         lines.append(f"  - Last run: {last_run or 'Never'}")
         lines.append(f"  - Last status: {last_status}")
+        lines.append(f"  - Msg: {msg_id or 'None'}")
 
     msg = "\n".join(lines)
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -496,6 +528,8 @@ def main():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("setauto", setauto))
+    telegram_app.add_handler(CommandHandler("setjob", setjob))
+    telegram_app.add_handler(CommandHandler("stopjob", stopjob))
     telegram_app.add_handler(CommandHandler("autoon", autoon))
     telegram_app.add_handler(CommandHandler("autooff", autooff))
     telegram_app.add_handler(CommandHandler("settings", settings))
