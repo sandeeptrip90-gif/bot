@@ -210,25 +210,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "🛠 **BOT HELP MENU**\n\n"
-        "♻️ **Auto Broadcast**\n"
-        "/setauto – Reply to a message to set auto message\n"
-        "/autoon – Turn auto broadcast ON\n"
-        "/autooff – Turn auto broadcast OFF\n"
-        "/settings <mins> <nightstart> <nightend>\n"
-        "  Example: /settings 1 0 0\n"
-        "/status – Show auto broadcast status\n\n"
+        "♻️ **Multi-Job Auto Broadcast** (5 Independent Jobs)\n"
+        "/setjob <id> <mins> – Reply to a message to set Job <id> (1-5) with interval <mins>.\n"
+        "/stopjob <id> – Stop and remove Job <id>.\n"
+        "/autoon – Resume all configured jobs.\n"
+        "/autooff – Stop all jobs.\n"
+        "/settings <night_start> <night_end> – Set night hours (IST 0-23, use 0 0 to disable).\n"
+        "/status – Show all jobs, intervals, last/next run, current IST time.\n\n"
         "📢 **Manual Broadcast & Manage**\n"
         "/broadcast – Reply to send message to all groups\n"
         "/pin – Reply to send & pin message in all groups\n"
         "/unpinall – Remove all pinned messages\n"
         "/info – Show group names & member count\n\n"
-        "📊 **Stats & Info**\n"
-        "/stats – Total number of groups\n\n"
+        "⏱ **Timing (IST)**\n"
+        "• All times are Indian Standard Time (UTC+5:30)\n"
+        "• Jobs skip during night mode\n"
+        "• Use /settings 0 0 to disable night mode\n\n"
         "🤖 **Notes**\n"
-        "• Groups are MANUALLY added in code\n"
+        "• 5 independent jobs, each with own message & interval\n"
         "• Bot must be admin in groups\n"
-        "• Supports text, photo, video, voice, files\n"
-        "• Night mode respected automatically"
+        "• Supports text, photo, video, voice, files"
     )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -543,25 +544,6 @@ def main():
 
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
-
-    # Initial staggered jobs so they can be managed individually
-    job_base = 'auto_broadcast'
-    interval_secs = config["interval_mins"] * 60
-    for i in range(1, JOB_COUNT + 1):
-        first = 10 + int((i - 1) * (interval_secs / JOB_COUNT))
-        name = f"{job_base}_{i}"
-        telegram_app.job_queue.run_repeating(
-            auto_broadcast_job,
-            interval=interval_secs,
-            first=first,
-            name=name
-        )
-        # initialize tracking record in case main starts jobs
-        config["jobs"].setdefault(name, {})
-        config["jobs"][name]["interval_secs"] = interval_secs
-        config["jobs"][name]["next_run"] = None
-        config["jobs"][name]["last_run"] = None
-        config["jobs"][name]["last_status"] = "scheduled"
 
     print("🤖 Bot is running...")
     telegram_app.run_polling(drop_pending_updates=True)
