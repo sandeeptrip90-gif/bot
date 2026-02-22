@@ -36,7 +36,8 @@ def start_web():
 
 
 
-print("🚀 Bot file loaded successfully")
+# startup message (emoji removed to avoid encoding issues during import)
+print("Bot file loaded successfully")
 
 # =====================================================
 # 🔐 BASIC CONFIG
@@ -49,7 +50,7 @@ ADMIN_ID = 5599766250
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
 # =====================================================
 
-GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -1002015706191, -1002295951659, -1002350372764, -1002408686476, -1002458796542, -1002459378218, -1001787331133, -1001797945922, -1001843610820, -1002052681893, -1002126246859, -1001509387207, -1001738062150, -1001587346978, -1001829615017, -1002083172621, -1002411884866, -1001567747819, -1002254648501, -1003366623406, -1002283304339, -4557532425, -1001637428890, -1002299671203, -1002568461287, -1002538473462]
+GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -1002295951659, -1002350372764, -1002408686476, -1002458796542, -1002459378218, -1001787331133, -1001797945922, -1001843610820, -1002052681893, -1002126246859, -1001509387207, -1001738062150, -1001587346978, -1001829615017, -1002083172621, -1002411884866, -1001567747819, -1002254648501, -1003366623406, -1002283304339, -4557532425, -1001637428890, -1002299671203, -1002568461287, -1002538473462]
 
 # =====================================================
 # ⚙️ AUTO BROADCAST SETTINGS (IN-MEMORY, NO JSON)
@@ -64,14 +65,19 @@ config = {
 JOB_COUNT = 5
 
 # Per-job storage template: jobs are keyed `job_1`..`job_5`.
-# Each job stores: message_id, from_chat_id, interval_mins, is_active, last_run, next_run, last_status
+# Each job stores scheduling info and a rotating message pool.
+# time: "HH:MM" string in IST when the job should run daily.
+# pool: list of {from_chat_id, message_id} entries for round-robin.
+# pool_index: next index to use from the pool.
+# is_active: whether the job is enabled.
+# last_run/next_run/last_status for diagnostics.
 config.setdefault("jobs", {})
 for i in range(1, JOB_COUNT + 1):
     name = f"job_{i}"
     config["jobs"].setdefault(name, {
-        "message_id": None,
-        "from_chat_id": None,
-        "interval_mins": None,
+        "time": None,
+        "pool": [],
+        "pool_index": 0,
         "is_active": False,
         "last_run": None,
         "next_run": None,
@@ -82,6 +88,41 @@ for i in range(1, JOB_COUNT + 1):
 # Time helpers (IST)
 def get_ist_now() -> datetime:
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
+def format_time_12h(hhmm: str) -> str:
+    """Convert a 24‑hour "HH:MM" string to 12‑hour format with AM/PM."""
+    try:
+        hh, mm = map(int, hhmm.split(":"))
+    except Exception:
+        return hhmm
+    suffix = "AM" if hh < 12 else "PM"
+    hour = hh % 12
+    if hour == 0:
+        hour = 12
+    return f"{hour:02d}:{mm:02d} {suffix}"
+
+
+def schedule_daily_job(context, job_name: str, hh: int, mm: int):
+    """Schedule `auto_broadcast_job` to run every day at HH:MM IST.
+
+    We compute the delay from now (in IST) to the next occurrence and then
+    schedule a repeating job with an interval of 86400 seconds.
+    """
+    now = get_ist_now()
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    first_delay = (target - now).total_seconds()
+    # remove any existing job with same name before scheduling
+    for j in context.application.job_queue.get_jobs_by_name(job_name):
+        j.schedule_removal()
+    context.application.job_queue.run_repeating(
+        auto_broadcast_job,
+        interval=86400,
+        first=first_delay,
+        name=job_name,
+    )
 
 # Developer notes — How to create new jobs
 # Option A — Use the built-in staggered auto jobs:
@@ -139,23 +180,37 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         job_name = None
 
     print(f"🔁 Auto job triggered (IST) at: {now.strftime('%Y-%m-%d %H:%M:%S')} | job={job_name} | Night Start: {config['night_start']}, Night End: {config['night_end']}")
-    # job-specific logic: use message stored for this job
+    # job-specific logic: pick next entry from the rotation pool
     record = config.get("jobs", {}).get(job_name)
     if not record:
         print(f"⚠️ No config record for {job_name}, skipping")
         return
 
-    # check active and message
     if not record.get("is_active"):
         print(f"⏸ {job_name} is inactive, skipping")
         record["last_run"] = now.isoformat()
         record["last_status"] = "skipped:inactive"
         return
 
-    if not record.get("message_id") or not record.get("from_chat_id"):
-        print(f"⚠️ {job_name} has no message configured, skipping")
+    pool = record.get("pool", [])
+    if not pool:
+        print(f"⚠️ {job_name} has empty pool, skipping")
         record["last_run"] = now.isoformat()
-        record["last_status"] = "skipped:no-msg"
+        record["last_status"] = "skipped:no-pool"
+        return
+
+    # select next message from pool (round‑robin)
+    idx = record.get("pool_index", 0) % len(pool)
+    entry = pool[idx]
+    record["pool_index"] = (idx + 1) % len(pool)
+
+    # prepare broadcast parameters
+    from_chat = entry.get("from_chat_id")
+    msg_id = entry.get("message_id")
+    if not from_chat or not msg_id:
+        print(f"⚠️ {job_name} pool entry invalid, skipping")
+        record["last_run"] = now.isoformat()
+        record["last_status"] = "skipped:bad-entry"
         return
 
     is_night = night_mode()
@@ -166,7 +221,7 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         record["last_status"] = "skipped:night"
         return
 
-    print(f"📤 {job_name}: Sending message to {len(GROUP_IDS)} groups...")
+    print(f"📤 {job_name}: Sending message to {len(GROUP_IDS)} groups... (using pool index {idx})")
     record["last_run"] = now.isoformat()
     record["last_status"] = "running"
 
@@ -174,23 +229,20 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.copy_message(
                 chat_id=gid,
-                from_chat_id=record.get("from_chat_id"),
-                message_id=record.get("message_id")
+                from_chat_id=from_chat,
+                message_id=msg_id
             )
             await asyncio.sleep(0.5)
         except Exception as e:
             print(f"❌ Failed for {gid}: {e}")
 
-    # update next run if job object available
+    # update next run and keep schedule time
     try:
         job_list = context.application.job_queue.get_jobs_by_name(job_name)
         if job_list:
             job = job_list[0]
             next_rt = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
             record["next_run"] = next_rt.isoformat() if next_rt else None
-            interval = getattr(job, 'interval', None)
-            if interval:
-                record["interval_mins"] = int(interval / 60)
     except Exception:
         pass
 
@@ -211,12 +263,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🛠 **BOT HELP MENU**\n\n"
         "♻️ **Multi-Job Auto Broadcast** (5 Independent Jobs)\n"
-        "/setjob <id> <mins> – Reply to a message to set Job <id> (1-5) with interval <mins>.\n"
-        "/stopjob <id> – Stop and remove Job <id>.\n"
+        "/setjob <id> <HH:MM> – Reply to a message to add it to Job <id>'s rotation and set a daily time (IST).\n"
+        "    Subsequent replies to the same job append to its pool; messages cycle every day.\n"
+        "/stopjob <id> – Stop (pause) Job <id>. Pool is retained.\n"
         "/stopall – Stop all 5 jobs & disable auto broadcast.\n"
         "/autooff – Alias for /stopall (kills all timers).\n"
         "/settings <night_start> <night_end> – Set night hours (IST 0-23, use 0 0 to disable).\n"
-        "/status – Show all 5 jobs, intervals, last/next run, current IST time.\n\n"
+        "/status – Show all 5 jobs, scheduled time, pool size, next run, current IST time.\n\n"
         "📢 **Manual Broadcast & Manage**\n"
         "/broadcast – Reply to send message to all groups\n"
         "/pin – Reply to send & pin message in all groups\n"
@@ -228,7 +281,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Jobs skip during night mode\n"
         "• Use /settings 0 0 to disable night mode\n\n"
         "🤖 **Notes**\n"
-        "• 5 independent jobs, each with own message & interval\n"
+        "• 5 independent jobs, each with its own daily time and message pool.\n"
+        "• Pool messages rotate round‑robin every day.\n"
         "• Bot must be admin in groups\n"
         "• Supports text, photo, video, voice, files"
     )
@@ -257,48 +311,58 @@ async def setauto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Configure a job for a fixed daily time and add the replied message to its rotation pool.
+
+    Usage: /setjob <id> <HH:MM>  (e.g. /setjob 1 08:00). Reply to a message to add it
+    to the job's pool. The job will then run every day at the specified IST time,
+    cycling through all messages in its pool in round‑robin fashion.
+    """
     if not is_admin(update):
         return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <mins>")
+        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <HH:MM>")
+
+    # parse arguments
     try:
         args = context.args
         if not args or len(args) < 2:
             raise IndexError
         job_id = int(args[0])
-        mins = int(args[1])
-        
-        if mins <= 0:
-            raise ValueError("Interval must be positive")
+        time_str = args[1]
+        hh, mm = map(int, time_str.split(":"))
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError("Hour/minute out of range")
     except (IndexError, ValueError):
-        return await update.message.reply_text("❌ Usage: /setjob <id> <mins> (id: 1-5, mins: positive integer)")
+        return await update.message.reply_text(
+            "❌ Usage: /setjob <id> <HH:MM> (id: 1-5, time in 24‑hour IST, e.g. 08:00)"
+        )
 
     if job_id < 1 or job_id > JOB_COUNT:
         return await update.message.reply_text(f"❌ Job id must be between 1 and {JOB_COUNT}")
 
     name = f"job_{job_id}"
-    # store message
-    config["jobs"][name]["message_id"] = update.message.reply_to_message.message_id
-    config["jobs"][name]["from_chat_id"] = update.message.chat_id
-    config["jobs"][name]["interval_mins"] = mins
-    config["jobs"][name]["is_active"] = True
-    config["jobs"][name]["last_status"] = "scheduled"
+    rec = config["jobs"][name]
+    # add message to pool
+    rec.setdefault("pool", [])
+    rec["pool"].append({
+        "from_chat_id": update.message.chat_id,
+        "message_id": update.message.reply_to_message.message_id
+    })
+    rec["time"] = f"{hh:02d}:{mm:02d}"
+    rec.setdefault("pool_index", 0)
+    rec["is_active"] = True
+    rec["last_status"] = "scheduled"
 
-    # remove existing job if any
-    existing = context.application.job_queue.get_jobs_by_name(name)
-    for j in existing:
-        j.schedule_removal()
+    # schedule the job (removing any existing first)
+    schedule_daily_job(context, name, hh, mm)
 
-    # schedule repeating job
-    interval_secs = mins * 60
-    context.application.job_queue.run_repeating(
-        auto_broadcast_job,
-        interval=interval_secs,
-        first=10,
-        name=name
+    pool_len = len(rec["pool"])
+    msg = (
+        f"✅ **Job {job_id} configured:**\n"
+        f"• Time: {hh:02d}:{mm:02d} IST daily\n"
+        f"• Pool size: {pool_len} message{'s' if pool_len != 1 else ''}\n"
+        "\nUse /status to monitor."
     )
-
-    msg = f"✅ **Job {job_id} configured:**\n• Interval: {mins} min\n• Message: {update.message.reply_to_message.message_id}\n• Status: Running\n\nUse /status to monitor."
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
@@ -324,7 +388,11 @@ async def stopjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config["jobs"][name]["is_active"] = False
     config["jobs"][name]["last_status"] = "stopped"
 
-    msg = f"⏹ **Job {job_id} stopped**\n• Timer removed\n• {stopped} active task(s) killed"
+    msg = (
+        f"⏹ **Job {job_id} stopped**\n"
+        f"• Timer removed (pool preserved)\n"
+        f"• {stopped} active task(s) killed"
+    )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
@@ -336,25 +404,19 @@ async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Resume all configured jobs
     config["is_active"] = True
 
-    # Schedule any configured jobs (per-job intervals)
+    # Schedule any configured jobs using stored daily time
     for i in range(1, JOB_COUNT + 1):
         name = f"job_{i}"
         rec = config["jobs"].get(name)
-        if rec and rec.get("interval_mins") and rec.get("message_id"):
-            # Only resume if has interval and message
-            interval_secs = int(rec["interval_mins"]) * 60
-            # remove existing to avoid duplicates
-            for j in context.application.job_queue.get_jobs_by_name(name):
-                j.schedule_removal()
-            # Schedule the job
-            context.application.job_queue.run_repeating(
-                auto_broadcast_job,
-                interval=interval_secs,
-                first=10,
-                name=name
-            )
+        time_str = rec.get("time") if rec else None
+        if rec and time_str and rec.get("pool"):
+            try:
+                hh, mm = map(int, time_str.split(":"))
+            except Exception:
+                continue
+            schedule_daily_job(context, name, hh, mm)
             rec["is_active"] = True
-            print(f"Log: Resumed job '{name}' with interval {rec['interval_mins']} mins")
+            print(f"Log: Resumed job '{name}' at {time_str} IST")
 
     await update.message.reply_text("▶️ Auto broadcast: resumed configured jobs.")
     print("Log: Auto broadcast jobs resumed.")
@@ -435,10 +497,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         running = len(jobs) > 0
 
         record = config.get("jobs", {}).get(name, {})
-        interval_mins = record.get("interval_mins")
-        msg_id = record.get("message_id")
-        is_active = record.get("is_active", False)
-        last_status = record.get("last_status", "idle")
+        time_str = record.get("time") or "?"
+        pool = record.get("pool", [])
+        pool_len = len(pool)
 
         # Format next run time more readably
         next_run_str = "N/A"
@@ -452,11 +513,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     next_run_str = "N/A"
 
         status_icon = "▶️" if running else "⏸"
-        lines.append(f"{status_icon} **Job {i}**: {'ON' if running else 'OFF'} | {interval_mins or '?'} min | Next: {next_run_str}")
-        if msg_id:
-            lines.append(f"    Msg ID: {msg_id}")
+        human_time = format_time_12h(time_str) if time_str and time_str != "?" else "?"
+        # main description starts with schedule phrase to match user request
+        lines.append(
+            f"{status_icon} **Job {i}** scheduled for {human_time} IST daily | {'ON' if running else 'OFF'} | Pool: {pool_len}"
+        )
+        if pool_len > 0:
+            lines.append(f"    Next message index: {record.get('pool_index', 0)}")
         else:
-            lines.append(f"    ❌ No message set")
+            lines.append(f"    ❌ No messages in pool")
 
     msg = "\n".join(lines)
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -586,6 +651,5 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
-
 
 
