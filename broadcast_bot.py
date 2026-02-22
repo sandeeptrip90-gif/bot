@@ -43,8 +43,8 @@ print("Bot file loaded successfully")
 # 🔐 BASIC CONFIG
 # =====================================================
 
-TOKEN = "8218945392:AAFI4b2_Yo9wXhQJFCL63vw8FHpOeefkHPU"
-ADMIN_ID = 5599766250
+TOKEN = os.getenv("TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
 # =====================================================
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
@@ -651,5 +651,6 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
+
 
 
