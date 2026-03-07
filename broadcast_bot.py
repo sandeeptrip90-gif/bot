@@ -264,6 +264,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛠 **BOT HELP MENU**\n\n"
         "♻️ **Multi-Job Auto Broadcast** (5 Independent Jobs)\n"
         "/setjob <id> <HH:MM> – Reply to a message to add it to Job <id>'s rotation and set a daily time (IST).\n"
+        "2️⃣ **Interval:** `/setjob 1 30` (Every 30 minutes repeatedly)\n"
         "    Subsequent replies to the same job append to its pool; messages cycle every day.\n"
         "/stopjob <id> – Stop (pause) Job <id>. Pool is retained.\n"
         "/stopall – Stop all 5 jobs & disable auto broadcast.\n"
@@ -292,78 +293,60 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= AUTO CONTROLS =================
 
-async def setauto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-
-    print("📝 /setauto command used")
-
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("❌ Reply to a message.")
-
-    config["auto_msg_id"] = update.message.reply_to_message.message_id
-    config["from_chat_id"] = update.message.chat_id
-    config["is_active"] = True
-
-    print("✅ Auto message configured")
-
-    await update.message.reply_text("✅ Auto message set & activated.")
-
-
 async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Configure a job for a fixed daily time and add the replied message to its rotation pool.
-
-    Usage: /setjob <id> <HH:MM>  (e.g. /setjob 1 08:00). Reply to a message to add it
-    to the job's pool. The job will then run every day at the specified IST time,
-    cycling through all messages in its pool in round‑robin fashion.
-    """
-    if not is_admin(update):
-        return
+    if not is_admin(update): return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <HH:MM>")
+        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <time/mins>")
 
-    # parse arguments
     try:
         args = context.args
-        if not args or len(args) < 2:
-            raise IndexError
         job_id = int(args[0])
-        time_str = args[1]
-        hh, mm = map(int, time_str.split(":"))
-        if not (0 <= hh <= 23 and 0 <= mm <= 59):
-            raise ValueError("Hour/minute out of range")
-    except (IndexError, ValueError):
-        return await update.message.reply_text(
-            "❌ Usage: /setjob <id> <HH:MM> (id: 1-5, time in 24‑hour IST, e.g. 08:00)"
+        input_val = args[1]
+        
+        if job_id < 1 or job_id > JOB_COUNT:
+            return await update.message.reply_text(f"❌ Job id must be 1-{JOB_COUNT}")
+
+        name = f"job_{job_id}"
+        rec = config["jobs"][name]
+        
+        # Add to message pool
+        rec["pool"].append({
+            "from_chat_id": update.message.chat_id,
+            "message_id": update.message.reply_to_message.message_id
+        })
+
+        # Check if input is HH:MM or Minutes
+        if ":" in input_val:
+            # FIXED DAILY TIME (IST)
+            hh, mm = map(int, input_val.split(":"))
+            schedule_daily_job(context, name, hh, mm)
+            rec["time"] = f"{hh:02d}:{mm:02d}"
+            mode_text = f"daily at {format_time_12h(rec['time'])} IST"
+        else:
+            # REPEATING INTERVAL (Minutes)
+            mins = int(input_val)
+            # Purane jobs delete karein
+            for j in context.application.job_queue.get_jobs_by_name(name):
+                j.schedule_removal()
+            # Naya interval job lagayein
+            context.application.job_queue.run_repeating(
+                auto_broadcast_job,
+                interval=mins * 60,
+                first=10, 
+                name=name
+            )
+            rec["time"] = f"every {mins}m"
+            mode_text = f"every {mins} minutes"
+
+        rec["is_active"] = True
+        pool_len = len(rec["pool"])
+        await update.message.reply_text(
+            f"✅ **Job {job_id} Set!**\n• Mode: {mode_text}\n• Pool Size: {pool_len} messages", 
+            parse_mode="Markdown"
         )
 
-    if job_id < 1 or job_id > JOB_COUNT:
-        return await update.message.reply_text(f"❌ Job id must be between 1 and {JOB_COUNT}")
-
-    name = f"job_{job_id}"
-    rec = config["jobs"][name]
-    # add message to pool
-    rec.setdefault("pool", [])
-    rec["pool"].append({
-        "from_chat_id": update.message.chat_id,
-        "message_id": update.message.reply_to_message.message_id
-    })
-    rec["time"] = f"{hh:02d}:{mm:02d}"
-    rec.setdefault("pool_index", 0)
-    rec["is_active"] = True
-    rec["last_status"] = "scheduled"
-
-    # schedule the job (removing any existing first)
-    schedule_daily_job(context, name, hh, mm)
-
-    pool_len = len(rec["pool"])
-    msg = (
-        f"✅ **Job {job_id} configured:**\n"
-        f"• Time: {hh:02d}:{mm:02d} IST daily\n"
-        f"• Pool size: {pool_len} message{'s' if pool_len != 1 else ''}\n"
-        "\nUse /status to monitor."
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text("❌ Usage:\nFixed: `/setjob 1 08:00` (IST)\nRepeating: `/setjob 1 30` (Minutes)")
 
 
 async def stopjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -478,7 +461,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show status of all 5 jobs with schedule, next run time, and IST clock."""
+    """Show status of all jobs with schedule, next run time, and IST clock."""
     if not is_admin(update): return
     ist = get_ist_now()
 
@@ -486,11 +469,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("📊 **BOT STATUS** (All times IST)")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"🕒 Current Time: {ist.strftime('%Y-%m-%d %H:%M:%S IST')}")
-    lines.append(f"🌙 Night Mode: {config['night_start']:02d}:00 → {config['night_end']:02d}:00 (0 0 = disabled)")
-    lines.append(f"🔴 Status: {'ACTIVE' if config.get('is_active', False) else 'INACTIVE'}")
+    lines.append(f"🌙 Night Mode: {config['night_start']:02d}:00 → {config['night_end']:02d}:00")
+    lines.append(f"🔴 Global Status: {'ACTIVE' if config.get('is_active', False) else 'INACTIVE'}")
     lines.append("")
-    lines.append("**JOB STATUS (1-5):**")
+    lines.append("**JOB STATUS (1-10):**")
 
+    # Humne JOB_COUNT ko 10 tak support karne ke liye loop chalaya hai
     for i in range(1, JOB_COUNT + 1):
         name = f"job_{i}"
         jobs = context.application.job_queue.get_jobs_by_name(name)
@@ -501,27 +485,30 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pool = record.get("pool", [])
         pool_len = len(pool)
 
-        # Format next run time more readably
-        next_run_str = "N/A"
+        status_icon = "▶️" if running else "⏸"
+        
+        # --- Logic for Display Time ---
+        if "every" in str(time_str):
+            display_time = f"**{time_str}**"
+        elif time_str != "?":
+            display_time = f"**{format_time_12h(time_str)} IST** daily"
+        else:
+            display_time = "**Not Set**"
+
+        # --- Line for each Job ---
+        lines.append(f"{status_icon} **Job {i}**: {display_time} | Pool: {pool_len}")
+
+        # Agar job active hai toh next run time dikhao
         if running:
             job = jobs[0]
             nr = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
             if nr:
-                try:
-                    next_run_str = nr.strftime('%H:%M:%S') if hasattr(nr, 'strftime') else str(nr)[:8]
-                except:
-                    next_run_str = "N/A"
-
-        status_icon = "▶️" if running else "⏸"
-        human_time = format_time_12h(time_str) if time_str and time_str != "?" else "?"
-        # main description starts with schedule phrase to match user request
-        lines.append(
-            f"{status_icon} **Job {i}** scheduled for {human_time} IST daily | {'ON' if running else 'OFF'} | Pool: {pool_len}"
-        )
-        if pool_len > 0:
-            lines.append(f"    Next message index: {record.get('pool_index', 0)}")
-        else:
-            lines.append(f"    ❌ No messages in pool")
+                # Local IST format mein convert karke dikhane ke liye
+                next_run_ist = nr + timedelta(hours=5, minutes=30)
+                lines.append(f"     ⏭ Next run: `{next_run_ist.strftime('%H:%M:%S')}`")
+        
+        if pool_len == 0 and running:
+            lines.append(f"    ⚠️ Warning: Pool is empty!")
 
     msg = "\n".join(lines)
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -651,6 +638,5 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
-
 
 
