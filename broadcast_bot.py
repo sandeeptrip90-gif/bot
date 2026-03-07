@@ -513,6 +513,79 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "\n".join(lines)
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+# =====================================================
+# 🛠 GROUP MANAGEMENT COMMANDS
+# =====================================================
+
+async def setgname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sabhhi groups ka naam ek saath badle (Usage: /setgname Naya Naam)"""
+    if not is_admin(update): return
+    
+    new_name = " ".join(context.args)
+    if not new_name:
+        return await update.message.reply_text("❌ Usage: `/setgname My New Group Name`", parse_mode="Markdown")
+
+    success = 0
+    for gid in GROUP_IDS:
+        try:
+            await context.bot.set_chat_title(chat_id=gid, title=new_name)
+            success += 1
+            await asyncio.sleep(0.5) # Anti-flood delay
+        except Exception as e:
+            print(f"❌ Name change failed for {gid}: {e}")
+
+    await update.message.reply_text(f"✅ {success} groups ka naam badal diya gaya.")
+
+
+async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sabhi groups ka description badle (Usage: /setgdesc Nayi Jankari)"""
+    if not is_admin(update): return
+    
+    new_desc = " ".join(context.args)
+    if not new_desc:
+        return await update.message.reply_text("❌ Usage: `/setgdesc Naya Description Text`", parse_mode="Markdown")
+
+    success = 0
+    for gid in GROUP_IDS:
+        try:
+            await context.bot.set_chat_description(chat_id=gid, description=new_desc)
+            success += 1
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"❌ Description change failed for {gid}: {e}")
+
+    await update.message.reply_text(f"✅ {success} groups ka description update ho gaya.")
+
+
+async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sabhi groups ki profile pic badle (Usage: Reply to a Photo with /setgpic)"""
+    if not is_admin(update): return
+    
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        return await update.message.reply_text("❌ Kisi Photo par reply karke `/setgpic` likhein.")
+
+    # Get the best quality photo
+    photo_file = await update.message.reply_to_message.photo[-1].get_file()
+    # Download locally temporarily
+    temp_path = "temp_pic.jpg"
+    await photo_file.download_to_drive(temp_path)
+
+    success = 0
+    for gid in GROUP_IDS:
+        try:
+            with open(temp_path, 'rb') as photo:
+                await context.bot.set_chat_photo(chat_id=gid, photo=photo)
+            success += 1
+            await asyncio.sleep(1.0) # Photo upload takes time, higher delay
+        except Exception as e:
+            print(f"❌ Photo change failed for {gid}: {e}")
+
+    # Remove temporary file
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+
+    await update.message.reply_text(f"✅ {success} groups ki DP badal di gayi.")
+
 # ================= MANUAL BROADCAST =================
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -627,6 +700,9 @@ def main():
     telegram_app.add_handler(CommandHandler("unpinall", unpinall))
     telegram_app.add_handler(CommandHandler("info", info))
     telegram_app.add_handler(CommandHandler("stats", stats))
+    telegram_app.add_handler(CommandHandler("setgname", setgname))
+    telegram_app.add_handler(CommandHandler("setgdesc", setgdesc))
+    telegram_app.add_handler(CommandHandler("setgpic", setgpic))
 
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
