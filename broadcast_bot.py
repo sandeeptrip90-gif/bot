@@ -9,41 +9,25 @@ from telegram.ext import (
 )
 from flask import Flask
 from threading import Thread
+import os
 
-# Use a distinct name for the Flask app to avoid shadowing the Telegram
-# Application object later named `telegram_app`.
 flask_app = Flask(__name__)
-
 
 @flask_app.route("/")
 def home():
-    return "Bot is alive"
+    return "Bot is alive and running!"
 
-
-# 1. run_web function ko update karein
 def run_web():
-    # Render automatically PORT env variable deta hai, 
-    # agar nahi mile toh 10000 default use karein
-    port = int(os.environ.get("PORT", 10000)) 
-    flask_app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False,
-        use_reloader=False
-    )
+    # Render port automatically handle karega
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
-# 2. main() function mein run_polling ke sath ek chota badlav
-def main():
-    start_web()
-    print("🌐 Web server started for Render Health Check")
-
-    telegram_app = Application.builder().token(TOKEN).build()
+def start_web():
+    """Is function ko main() ke andar call karna hai"""
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
     
-    # ... (baaki saare handlers yahan rahenge) ...
-
-    print("🤖 Bot is running...")
-    # drop_pending_updates=True Render restarts ke waqt purane messages ignore karega
-    telegram_app.run_polling(drop_pending_updates=True)
 
 
 # startup message (emoji removed to avoid encoding issues during import)
@@ -685,12 +669,13 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================
 
 def main():
-
-    start_web()
-    print("🌐 Web server started")
+    # 1. Web server start karein (Render ke liye zaroori)
+    start_web() 
+    print("🌐 Web server started for Render Health Check")
 
     print("⚙️ Initializing bot...")
-    # Create Telegram Application instance and keep it separate from Flask
+    
+    # 2. Variable ka naam 'telegram_app' hi rakhein
     telegram_app = Application.builder().token(TOKEN).build()
 
     print("✅ Bot connected to Telegram")
@@ -724,6 +709,7 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
+
 
 
 
