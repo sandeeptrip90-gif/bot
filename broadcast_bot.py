@@ -20,20 +20,30 @@ def home():
     return "Bot is alive"
 
 
+# 1. run_web function ko update karein
 def run_web():
+    # Render automatically PORT env variable deta hai, 
+    # agar nahi mile toh 10000 default use karein
+    port = int(os.environ.get("PORT", 10000)) 
     flask_app.run(
         host="0.0.0.0",
-        port=8080,
+        port=port,
         debug=False,
         use_reloader=False
     )
 
+# 2. main() function mein run_polling ke sath ek chota badlav
+def main():
+    start_web()
+    print("🌐 Web server started for Render Health Check")
 
-def start_web():
-    t = Thread(target=run_web)
-    t.daemon = True
-    t.start()
+    telegram_app = Application.builder().token(TOKEN).build()
+    
+    # ... (baaki saare handlers yahan rahenge) ...
 
+    print("🤖 Bot is running...")
+    # drop_pending_updates=True Render restarts ke waqt purane messages ignore karega
+    telegram_app.run_polling(drop_pending_updates=True)
 
 
 # startup message (emoji removed to avoid encoding issues during import)
@@ -714,5 +724,6 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
+
 
 
