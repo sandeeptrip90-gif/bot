@@ -38,7 +38,7 @@ print("Bot file loaded successfully")
 # =====================================================
 
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = 5599766250, 8277868762, 5880279806
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
 # =====================================================
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
