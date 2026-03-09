@@ -10,8 +10,6 @@ from telegram.ext import (
 from flask import Flask
 from threading import Thread
 import os
-import pytz
-from datetime import time
 
 flask_app = Flask(__name__)
 
@@ -215,6 +213,7 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     ist = get_ist_now()
     now = ist
     hour = now.hour
+    
     # Determine job name if available
     job_name = None
     try:
@@ -223,6 +222,7 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         job_name = None
 
     print(f"🔁 Auto job triggered (IST) at: {now.strftime('%Y-%m-%d %H:%M:%S')} | job={job_name} | Night Start: {config['night_start']}, Night End: {config['night_end']}")
+    
     # job-specific logic: pick next entry from the rotation pool
     record = config.get("jobs", {}).get(job_name)
     if not record:
@@ -264,11 +264,18 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         record["last_status"] = "skipped:night"
         return
 
-    print(f"📤 {job_name}: Sending message to {len(GROUP_IDS)} groups... (using pool index {idx})")
+    # =====================================================
+    # 🎯 TARGETED LOGIC PATCH
+    # =====================================================
+    target_gid = record.get("target_group") # Specific ID or None
+    target_list = [target_gid] if target_gid else GROUP_IDS
+    dest_log = f"Specific Group ({target_gid})" if target_gid else f"{len(GROUP_IDS)} groups"
+    
+    print(f"📤 {job_name}: Sending message to {dest_log}... (using pool index {idx})")
     record["last_run"] = now.isoformat()
     record["last_status"] = "running"
 
-    for gid in GROUP_IDS:
+    for gid in target_list:
         try:
             await context.bot.copy_message(
                 chat_id=gid,
@@ -278,6 +285,16 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.5)
         except Exception as e:
             print(f"❌ Failed for {gid}: {e}")
+
+    # update next run and keep schedule time
+    try:
+        job_list = context.application.job_queue.get_jobs_by_name(job_name)
+        if job_list:
+            job = job_list[0]
+            next_rt = getattr(job, 'next_run_time', getattr(job, 'next_t', None))
+            record["next_run"] = next_rt.isoformat() if next_rt else None
+    except Exception:
+        pass
 
     # update next run and keep schedule time
     try:
@@ -350,96 +367,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= AUTO CONTROLS =================
 
 
-# 1. Ye helper function zaroori hai daily jobs ke liye
-def schedule_daily_job(context, name, hh, mm):
-    # Purane jobs remove karein
-    for j in context.application.job_queue.get_jobs_by_name(name):
-        j.schedule_removal()
-    
-    # IST Timezone set karein
-    ist = pytz.timezone('Asia/Kolkata')
-    target_time = time(hour=hh, minute=mm, tzinfo=ist)
-    
-    # Rozana ka job schedule karein
-    context.application.job_queue.run_daily(
-        auto_broadcast_job, 
-        time=target_time, 
-        name=name
-    )
-
-# 2. Updated Job Logic
-async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
-    job_name = context.job.name
-    record = config.get("jobs", {}).get(job_name)
-    
-    if not record or not record.get("is_active") or not record.get("pool"):
-        return
-
-    # Check for Specific Group or All Groups
-    target_gid = record.get("target_group")
-    target_list = [target_gid] if target_gid else GROUP_IDS
-
-    idx = record.get("pool_index", 0) % len(record["pool"])
-    entry = record["pool"][idx]
-    record["pool_index"] = (idx + 1) % len(record["pool"])
-
-    if night_mode():
-        return
-
-    for gid in target_list:
-        try:
-            await context.bot.copy_message(
-                chat_id=gid,
-                from_chat_id=entry["from_chat_id"],
-                message_id=entry["message_id"]
-            )
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            print(f"❌ Failed for {gid}: {e}")
-
-# 3. Updated Setjob Command
-async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("❌ Pehle message par Reply karein!")
-
-    try:
-        args = context.args
-        job_id = int(args[0])
-        input_val = args[1]
-        
-        # Specific Group ID (optional)
-        target_group = int(args[2]) if len(args) > 2 else None
-
-        name = f"job_{job_id}"
-        if name not in config["jobs"]:
-            config["jobs"][name] = {"pool": [], "pool_index": 0, "is_active": False}
-            
-        rec = config["jobs"][name]
-        rec["pool"].append({
-            "from_chat_id": update.message.chat_id,
-            "message_id": update.message.reply_to_message.message_id
-        })
-        rec["target_group"] = target_group
-
-        if ":" in input_val:
-            hh, mm = map(int, input_val.split(":"))
-            schedule_daily_job(context, name, hh, mm)
-            rec["time"] = f"{hh:02d}:{mm:02d} IST"
-        else:
-            mins = int(input_val)
-            for j in context.application.job_queue.get_jobs_by_name(name):
-                j.schedule_removal()
-            context.application.job_queue.run_repeating(auto_broadcast_job, interval=mins*60, first=10, name=name)
-            rec["time"] = f"every {mins}m"
-
-        rec["is_active"] = True
-        dest = f"Group `{target_group}`" if target_group else "All Groups"
-        await update.message.reply_text(f"✅ **Job {job_id} Active!**\n📍 Target: {dest}\n⏰ Time: {rec['time']}", parse_mode="Markdown")
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ **Error:** `{e}`\n\nUsage:\nAll: `/setjob 1 08:30`\nOne: `/setjob 1 08:30 -100xxx`", parse_mode="Markdown")
-
 # =====================================================
 # 🚫 BLACKLIST SYSTEM (Auto-Delete Specific User)
 # =====================================================
@@ -489,13 +416,16 @@ async def delete_spammer_message(update: Update, context: ContextTypes.DEFAULT_T
 async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <time/mins>")
+        return await update.message.reply_text("❌ Reply to a message when using /setjob <id> <time/mins> [target_id]")
 
     try:
         args = context.args
         job_id = int(args[0])
         input_val = args[1]
         
+        # --- TARGET ID PATCH ---
+        target_group = int(args[2]) if len(args) > 2 else None
+
         if job_id < 1 or job_id > JOB_COUNT:
             return await update.message.reply_text(f"❌ Job id must be 1-{JOB_COUNT}")
 
@@ -507,40 +437,33 @@ async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "from_chat_id": update.message.chat_id,
             "message_id": update.message.reply_to_message.message_id
         })
+        rec["target_group"] = target_group # Save target ID
 
-        # Check if input is HH:MM or Minutes
+        # Scheduling logic
         if ":" in input_val:
-            # FIXED DAILY TIME (IST)
             hh, mm = map(int, input_val.split(":"))
             schedule_daily_job(context, name, hh, mm)
             rec["time"] = f"{hh:02d}:{mm:02d}"
             mode_text = f"daily at {format_time_12h(rec['time'])} IST"
         else:
-            # REPEATING INTERVAL (Minutes)
             mins = int(input_val)
-            # Purane jobs delete karein
             for j in context.application.job_queue.get_jobs_by_name(name):
                 j.schedule_removal()
-            # Naya interval job lagayein
             context.application.job_queue.run_repeating(
-                auto_broadcast_job,
-                interval=mins * 60,
-                first=10, 
-                name=name
+                auto_broadcast_job, interval=mins*60, first=10, name=name
             )
             rec["time"] = f"every {mins}m"
             mode_text = f"every {mins} minutes"
 
         rec["is_active"] = True
-        pool_len = len(rec["pool"])
+        dest_text = f"Target ID: `{target_group}`" if target_group else "All Groups"
         await update.message.reply_text(
-            f"✅ **Job {job_id} Set!**\n• Mode: {mode_text}\n• Pool Size: {pool_len} messages", 
+            f"✅ **Job {job_id} Set!**\n• Destination: {dest_text}\n• Mode: {mode_text}\n• Pool: {len(rec['pool'])} msgs", 
             parse_mode="Markdown"
         )
-
     except Exception as e:
-        await update.message.reply_text("❌ Usage:\nFixed: `/setjob 1 08:00` (IST)\nRepeating: `/setjob 1 30` (Minutes)")
-
+        await update.message.reply_text("❌ Usage: `/setjob 1 08:00 [id]` or `/setjob 1 30 [id]`")
+        
 
 async def stopjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -930,8 +853,6 @@ def main():
     telegram_app.add_handler(CommandHandler("status", status))
 
     telegram_app.add_handler(CommandHandler("broadcast", broadcast))
-    # Targeted Scheduling Handler
-    telegram_app.add_handler(CommandHandler("setjob", setjob))
     telegram_app.add_handler(CommandHandler("pin", pin))
     telegram_app.add_handler(CommandHandler("unpinall", unpinall))
     telegram_app.add_handler(CommandHandler("info", info))
