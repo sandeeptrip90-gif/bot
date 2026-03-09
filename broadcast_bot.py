@@ -314,6 +314,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/stopall` - Global kill-switch for all timers\n"
         "• `/status` - Check active timers & message pool\n\n"
 
+        "🚫 **SECURITY & ANTI-SPAM**\n"
+        "• `/block <user_id>` - Auto-delete user's messages\n"
+        "• `/unblock <user_id>` - Remove user from blacklist\n\n"
+
         "🗑️ **POOL MANAGEMENT**\n"
         "• `/clearpool <id>` - Delete messages of Job <id>\n"
         "• `/resetallpools` - Wipe all 5 job pools clean\n\n"
@@ -341,6 +345,52 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= AUTO CONTROLS =================
+
+# =====================================================
+# 🚫 BLACKLIST SYSTEM (Auto-Delete Specific User)
+# =====================================================
+
+# Blacklisted User IDs ki list (Isse aap /block command se update kar payenge)
+config.setdefault("blacklist", [])
+
+async def block_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ko blacklist mein daalne ke liye (Usage: /block 12345678)"""
+    if not is_admin(update): return
+    try:
+        target_id = int(context.args[0])
+        if target_id not in config["blacklist"]:
+            config["blacklist"].append(target_id)
+            await update.message.reply_text(f"🚫 User `{target_id}` ko blacklist kar diya gaya hai. Ab iske saare messages auto-delete honge.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ Ye user pehle se blacklisted hai.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: `/block <user_id>`", parse_mode="Markdown")
+
+async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ko blacklist se hatane ke liye (Usage: /unblock 12345678)"""
+    if not is_admin(update): return
+    try:
+        target_id = int(context.args[0])
+        if target_id in config["blacklist"]:
+            config["blacklist"].remove(target_id)
+            await update.message.reply_text(f"✅ User `{target_id}` ko whitelist kar diya gaya hai.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ Ye user blacklist mein nahi hai.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: `/unblock <user_id>`", parse_mode="Markdown")
+
+# --- MAIN LOGIC (Ye har message ko check karega) ---
+async def delete_spammer_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agar message kisi blacklisted user ka hai, toh delete karein"""
+    if not update.effective_user: return
+    
+    user_id = update.effective_user.id
+    if user_id in config.get("blacklist", []):
+        try:
+            await update.message.delete()
+            print(f"🗑️ Deleted message from blacklisted user: {user_id}")
+        except Exception as e:
+            print(f"❌ Delete failed (Bot might not be admin): {e}")
 
 async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
@@ -796,6 +846,14 @@ def main():
 
     telegram_app.add_handler(CommandHandler("clearpool", clearpool))
     telegram_app.add_handler(CommandHandler("resetallpools", resetallpools))
+
+    # Admin Commands
+    telegram_app.add_handler(CommandHandler("block", block_user))
+    telegram_app.add_handler(CommandHandler("unblock", unblock_user))
+
+    # Auto-Delete Handler (Isse sabse niche rakhein)
+    from telegram.ext import MessageHandler, filters
+    telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, delete_spammer_message))
 
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
