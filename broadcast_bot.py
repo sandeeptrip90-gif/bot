@@ -378,25 +378,38 @@ async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    # Resume all configured jobs
     config["is_active"] = True
+    resumed_jobs = []
 
-    # Schedule any configured jobs using stored daily time
     for i in range(1, JOB_COUNT + 1):
         name = f"job_{i}"
         rec = config["jobs"].get(name)
-        time_str = rec.get("time") if rec else None
-        if rec and time_str and rec.get("pool"):
+        
+        # Check if job has time and messages in pool
+        if rec and rec.get("time") and rec.get("pool"):
+            time_str = rec["time"]
             try:
-                hh, mm = map(int, time_str.split(":"))
-            except Exception:
-                continue
-            schedule_daily_job(context, name, hh, mm)
-            rec["is_active"] = True
-            print(f"Log: Resumed job '{name}' at {time_str} IST")
+                if ":" in time_str:
+                    hh, mm = map(int, time_str.split(":"))
+                    schedule_daily_job(context, name, hh, mm)
+                else:
+                    # For interval jobs like "every 30m"
+                    mins = int(time_str.replace("every ", "").replace("m", ""))
+                    context.application.job_queue.run_repeating(
+                        auto_broadcast_job, interval=mins*60, first=10, name=name
+                    )
+                
+                rec["is_active"] = True
+                resumed_jobs.append(f"Job {i}")
+            except Exception as e:
+                print(f"Error resuming {name}: {e}")
 
-    await update.message.reply_text("▶️ Auto broadcast: resumed configured jobs.")
-    print("Log: Auto broadcast jobs resumed.")
+    if resumed_jobs:
+        msg = f"▶️ **Auto Broadcast Resumed!**\nActive: {', '.join(resumed_jobs)}"
+    else:
+        msg = "⚠️ **No jobs to resume.**\nPehle `/setjob` use karke timing aur message set karein."
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def autooff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop all jobs and disable auto broadcast. This is the global kill command."""
@@ -709,7 +722,6 @@ def main():
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
-
 
 
 
