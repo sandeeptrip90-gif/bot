@@ -347,6 +347,84 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= AUTO CONTROLS =================
 
 # =====================================================
+# 🔁 UPDATED AUTO BROADCAST JOB (Targeted logic)
+# =====================================================
+async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    job_name = context.job.name
+    record = config.get("jobs", {}).get(job_name)
+    
+    if not record or not record.get("is_active") or not record.get("pool"):
+        return
+
+    # Check if this job is for a specific group or ALL groups
+    target_gid = record.get("target_group") # Specific ID or None
+    target_list = [target_gid] if target_gid else GROUP_IDS
+
+    idx = record.get("pool_index", 0) % len(record["pool"])
+    entry = record["pool"][idx]
+    record["pool_index"] = (idx + 1) % len(record["pool"])
+
+    if night_mode():
+        return
+
+    print(f"📤 {job_name}: Sending to {'Specific Group' if target_gid else 'All Groups'}...")
+
+    for gid in target_list:
+        try:
+            await context.bot.copy_message(
+                chat_id=gid,
+                from_chat_id=entry["from_chat_id"],
+                message_id=entry["message_id"]
+            )
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"❌ Failed for {gid}: {e}")
+
+# =====================================================
+# 🛠 UPDATED SETJOB COMMAND
+# =====================================================
+async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("❌ Reply to a message!")
+
+    try:
+        args = context.args # Usage: /setjob <id> <time> [target_group_id]
+        job_id = int(args[0])
+        input_val = args[1]
+        
+        # Optional: Specific Group ID check
+        target_group = int(args[2]) if len(args) > 2 else None
+
+        name = f"job_{job_id}"
+        rec = config["jobs"][name]
+        
+        rec["pool"].append({
+            "from_chat_id": update.message.chat_id,
+            "message_id": update.message.reply_to_message.message_id
+        })
+        rec["target_group"] = target_group # Yahan specific group save hoga
+
+        # Scheduling logic (HH:MM or Minutes)
+        if ":" in input_val:
+            hh, mm = map(int, input_val.split(":"))
+            schedule_daily_job(context, name, hh, mm)
+            rec["time"] = f"{hh:02d}:{mm:02d}"
+        else:
+            mins = int(input_val)
+            for j in context.application.job_queue.get_jobs_by_name(name):
+                j.schedule_removal()
+            context.application.job_queue.run_repeating(auto_broadcast_job, interval=mins*60, first=10, name=name)
+            rec["time"] = f"every {mins}m"
+
+        rec["is_active"] = True
+        dest_text = f"Group: `{target_group}`" if target_group else "All Groups"
+        await update.message.reply_text(f"✅ **Job {job_id} Set!**\n• Destination: {dest_text}\n• Mode: {rec['time']}", parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text("❌ Usage:\nAll Groups: `/setjob 1 08:00`\nSpecific Group: `/setjob 1 08:00 -100xxx`")
+
+# =====================================================
 # 🚫 BLACKLIST SYSTEM (Auto-Delete Specific User)
 # =====================================================
 
@@ -836,6 +914,8 @@ def main():
     telegram_app.add_handler(CommandHandler("status", status))
 
     telegram_app.add_handler(CommandHandler("broadcast", broadcast))
+    # Targeted Scheduling Handler
+    telegram_app.add_handler(CommandHandler("setjob", setjob))
     telegram_app.add_handler(CommandHandler("pin", pin))
     telegram_app.add_handler(CommandHandler("unpinall", unpinall))
     telegram_app.add_handler(CommandHandler("info", info))
@@ -850,6 +930,7 @@ def main():
     # Admin Commands
     telegram_app.add_handler(CommandHandler("block", block_user))
     telegram_app.add_handler(CommandHandler("unblock", unblock_user))
+    
 
     # Auto-Delete Handler (Isse sabse niche rakhein)
     from telegram.ext import MessageHandler, filters
