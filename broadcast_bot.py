@@ -10,6 +10,7 @@ from telegram.ext import (
 from flask import Flask
 from threading import Thread
 import os
+from telegram.ext import MessageHandler, filters # Ye line script ke top par honi chahiye
 
 flask_app = Flask(__name__)
 
@@ -42,6 +43,7 @@ TOKEN = os.getenv("TOKEN")
 raw_admins = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", "0"))
 ADMIN_IDS = [int(id.strip()) for id in raw_admins.split(",") if id.strip().isdigit()]
 
+
 # =====================================================
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
 # =====================================================
@@ -51,33 +53,42 @@ GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -10
 # =====================================================
 # ⚙️ AUTO BROADCAST SETTINGS (IN-MEMORY, NO JSON)
 
+# Per-job storage template: jobs are keyed `job_1`..`job_5`.
+# Each job stores scheduling info and one source message.
+# time: "HH:MM" string in IST when the job should run daily.
+# from_chat_id/message_id: source message copied on each run.
+# is_active: whether the job is enabled.
+# last_run/next_run/last_status for diagnostics.
+# =====================================================
+# ⚙️ AUTO BROADCAST & ANTI-CHANGE SETTINGS
+# =====================================================
 
 config = {
     "night_start": 23,
-    "night_end": 7
+    "night_end": 7,
+    "is_active": False,
+    "blacklist": [],
+    "locked_details": {
+        "name": None,
+        "desc": None,
+        "pic_file_id": None,
+        "groups": {} 
+    }
 }
 
-# How many independent jobs to support
 JOB_COUNT = 10
-
-# Per-job storage template: jobs are keyed `job_1`..`job_5`.
-# Each job stores scheduling info and a rotating message pool.
-# time: "HH:MM" string in IST when the job should run daily.
-# pool: list of {from_chat_id, message_id} entries for round-robin.
-# pool_index: next index to use from the pool.
-# is_active: whether the job is enabled.
-# last_run/next_run/last_status for diagnostics.
 config.setdefault("jobs", {})
 for i in range(1, JOB_COUNT + 1):
     name = f"job_{i}"
     config["jobs"].setdefault(name, {
         "time": None,
-        "pool": [],
-        "pool_index": 0,
+        "from_chat_id": None,
+        "message_id": None,
         "is_active": False,
         "last_run": None,
         "next_run": None,
-        "last_status": "stopped"
+        "last_status": "stopped",
+        "target_group": None 
     })
 
 # =====================================================
@@ -119,6 +130,41 @@ def schedule_daily_job(context, job_name: str, hh: int, mm: int):
         first=first_delay,
         name=job_name,
     )
+
+async def monitor_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message: return
+    
+    # Bot ke apne changes ko ignore karein taaki loop na bane
+    if update.effective_user.id == context.bot.id: return
+    
+    chat = update.effective_chat
+    gid = str(chat.id)
+    
+    # Agar change karne wala Admin nahi hai
+    if not is_admin(update):
+        ld = config.get("locked_details", {})
+        specific = ld.get("groups", {}).get(gid, {})
+        
+        target_name = specific.get("name") or ld.get("name")
+        target_desc = specific.get("desc") or ld.get("desc")
+        target_pic = specific.get("pic") or ld.get("pic_file_id")
+
+        try:
+            # Revert Title
+            if update.message.new_chat_title and target_name:
+                await context.bot.set_chat_title(chat_id=chat.id, title=target_name)
+            
+            # Revert Photo
+            if update.message.new_chat_photo and target_pic:
+                await context.bot.set_chat_photo(chat_id=chat.id, photo=target_pic)
+                
+            # Revert Description
+            if target_desc:
+                await context.bot.set_chat_description(chat_id=chat.id, description=target_desc)
+
+            print(f"🛡️ Reverted unauthorized change in {gid}")
+        except Exception as e:
+            print(f"❌ Revert error in {gid}: {e}")    
 
 # Developer notes — How to create new jobs
 # Option A — Use the built-in staggered auto jobs:
@@ -166,7 +212,7 @@ def night_mode() -> bool:
 # =====================================================
 
 async def clearpool(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Specific Job ka pool delete karne ke liye (Usage: /clearpool 1)"""
+    """Legacy command: clear source message of a job (Usage: /clearpool 1)"""
     if not is_admin(update):
         return
 
@@ -179,34 +225,33 @@ async def clearpool(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = f"job_{job_id}"
     if name in config["jobs"]:
-        config["jobs"][name]["pool"] = []
-        config["jobs"][name]["pool_index"] = 0
-        # Agar pool khali ho jaye toh job ko pause karna safe rehta hai
+        config["jobs"][name]["from_chat_id"] = None
+        config["jobs"][name]["message_id"] = None
         config["jobs"][name]["is_active"] = False
         
         # Timer bhi hata dete hain taaki empty pool error na aaye
         for j in context.application.job_queue.get_jobs_by_name(name):
             j.schedule_removal()
 
-        await update.message.reply_text(f"🗑️ **Job {job_id} ka pool clear kar diya gaya hai.**\nAb ye job inactive hai.")
+        await update.message.reply_text(f"🗑️ **Job {job_id} ka source message clear kar diya gaya hai.**\nAb ye job inactive hai.")
     else:
         await update.message.reply_text("❌ Invalid Job ID.")
 
 async def resetallpools(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saare 5 jobs ke pools ko ek saath saaf karne ke liye"""
+    """Legacy command: clear source message of all jobs"""
     if not is_admin(update):
         return
 
     for i in range(1, JOB_COUNT + 1):
         name = f"job_{i}"
-        config["jobs"][name]["pool"] = []
-        config["jobs"][name]["pool_index"] = 0
+        config["jobs"][name]["from_chat_id"] = None
+        config["jobs"][name]["message_id"] = None
         config["jobs"][name]["is_active"] = False
         
         for j in context.application.job_queue.get_jobs_by_name(name):
             j.schedule_removal()
 
-    await update.message.reply_text("🚨 **All Pools Cleared!**\nSaare jobs reset ho gaye hain aur automation band kar di gayi hai.")
+    await update.message.reply_text("🚨 **All Job Messages Cleared!**\nSaare jobs reset ho gaye hain aur automation band kar di gayi hai.")
 
 async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     # Timing check ke liye log
@@ -223,7 +268,7 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
 
     print(f"🔁 Auto job triggered (IST) at: {now.strftime('%Y-%m-%d %H:%M:%S')} | job={job_name} | Night Start: {config['night_start']}, Night End: {config['night_end']}")
     
-    # job-specific logic: pick next entry from the rotation pool
+    # job-specific logic: use stored source message for this job
     record = config.get("jobs", {}).get(job_name)
     if not record:
         print(f"⚠️ No config record for {job_name}, skipping")
@@ -235,25 +280,12 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
         record["last_status"] = "skipped:inactive"
         return
 
-    pool = record.get("pool", [])
-    if not pool:
-        print(f"⚠️ {job_name} has empty pool, skipping")
-        record["last_run"] = now.isoformat()
-        record["last_status"] = "skipped:no-pool"
-        return
-
-    # select next message from pool (round‑robin)
-    idx = record.get("pool_index", 0) % len(pool)
-    entry = pool[idx]
-    record["pool_index"] = (idx + 1) % len(pool)
-
-    # prepare broadcast parameters
-    from_chat = entry.get("from_chat_id")
-    msg_id = entry.get("message_id")
+    from_chat = record.get("from_chat_id")
+    msg_id = record.get("message_id")
     if not from_chat or not msg_id:
-        print(f"⚠️ {job_name} pool entry invalid, skipping")
+        print(f"⚠️ {job_name} has no source message, skipping")
         record["last_run"] = now.isoformat()
-        record["last_status"] = "skipped:bad-entry"
+        record["last_status"] = "skipped:no-message"
         return
 
     is_night = night_mode()
@@ -271,7 +303,7 @@ async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     target_list = [target_gid] if target_gid else GROUP_IDS
     dest_log = f"Specific Group ({target_gid})" if target_gid else f"{len(GROUP_IDS)} groups"
     
-    print(f"📤 {job_name}: Sending message to {dest_log}... (using pool index {idx})")
+    print(f"📤 {job_name}: Sending message to {dest_log}...")
     record["last_run"] = now.isoformat()
     record["last_status"] = "running"
 
@@ -332,15 +364,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  - *Single Group:* Reply + `/setjob 1 45 -100xxx`\n"
         "• `/autoon` - Resume all configured jobs\n"
         "• `/stopall` - Global kill-switch for all timers\n"
-        "• `/status` - Check active timers & message pool\n\n"
+        "• `/status` - Check active timers & message setup\n\n"
 
         "🚫 **SECURITY & ANTI-SPAM**\n"
         "• `/block <user_id>` - Auto-delete user's messages\n"
         "• `/unblock <user_id>` - Remove user from blacklist\n\n"
 
-        "🗑️ **POOL MANAGEMENT**\n"
-        "• `/clearpool <id>` - Delete messages of Job <id>\n"
-        "• `/resetallpools` - Wipe all 5 job pools clean\n\n"
+        "🗑️ **JOB MESSAGE RESET**\n"
+        "• `/clearpool <id>` - Clear source msg of Job <id>\n"
+        "• `/resetallpools` - Clear source msgs of all jobs\n\n"
         
         "📢 **BROADCAST & ENGAGEMENT**\n"
         "• `/broadcast` - Reply to msg to send in all groups\n"
@@ -432,11 +464,9 @@ async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = f"job_{job_id}"
         rec = config["jobs"][name]
         
-        # Add to message pool
-        rec["pool"].append({
-            "from_chat_id": update.message.chat_id,
-            "message_id": update.message.reply_to_message.message_id
-        })
+        # Store one source message per job
+        rec["from_chat_id"] = update.message.chat_id
+        rec["message_id"] = update.message.reply_to_message.message_id
         rec["target_group"] = target_group # Save target ID
 
         # Scheduling logic
@@ -458,12 +488,12 @@ async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rec["is_active"] = True
         dest_text = f"Target ID: `{target_group}`" if target_group else "All Groups"
         await update.message.reply_text(
-            f"✅ **Job {job_id} Set!**\n• Destination: {dest_text}\n• Mode: {mode_text}\n• Pool: {len(rec['pool'])} msgs", 
+            f"✅ **Job {job_id} Set!**\n• Destination: {dest_text}\n• Mode: {mode_text}\n• Source message: updated",
             parse_mode="Markdown"
         )
     except Exception as e:
         await update.message.reply_text("❌ Usage: `/setjob 1 08:00 [id]` or `/setjob 1 30 [id]`")
-        
+
 
 async def stopjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -489,7 +519,7 @@ async def stopjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"⏹ **Job {job_id} stopped**\n"
-        f"• Timer removed (pool preserved)\n"
+        f"• Timer removed (source message preserved)\n"
         f"• {stopped} active task(s) killed"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -507,8 +537,8 @@ async def autoon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = f"job_{i}"
         rec = config["jobs"].get(name)
         
-        # Check if job has time and messages in pool
-        if rec and rec.get("time") and rec.get("pool"):
+        # Check if job has schedule and source message
+        if rec and rec.get("time") and rec.get("from_chat_id") and rec.get("message_id"):
             time_str = rec["time"]
             try:
                 if ":" in time_str:
@@ -603,6 +633,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     lines.append("**JOB STATUS (1-10):**")
 
+    # status function ke andar lines append karein
+    lines.append("\n🛡️ **ANTI-CHANGE LOCKS:**")
+    ld = config.get("locked_details", {})
+    lines.append(f"• Locked Name: `{ld.get('name') or 'Not Set'}`")
+    lines.append(f"• Locked DP: `{'Yes' if ld.get('pic_file_id') else 'No'}`")
+    lines.append(f"• Specific Overrides: `{len(ld.get('groups', {}))}`")
+
     # Humne JOB_COUNT ko 10 tak support karne ke liye loop chalaya hai
     for i in range(1, JOB_COUNT + 1):
         name = f"job_{i}"
@@ -611,8 +648,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         record = config.get("jobs", {}).get(name, {})
         time_str = record.get("time") or "?"
-        pool = record.get("pool", [])
-        pool_len = len(pool)
+        has_message = bool(record.get("from_chat_id") and record.get("message_id"))
 
         status_icon = "▶️" if running else "⏸"
         
@@ -625,7 +661,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             display_time = "**Not Set**"
 
         # --- Line for each Job ---
-        lines.append(f"{status_icon} **Job {i}**: {display_time} | Pool: {pool_len}")
+        lines.append(f"{status_icon} **Job {i}**: {display_time} | Message: {'set' if has_message else 'not set'}")
 
         # Agar job active hai toh next run time dikhao
         if running:
@@ -636,8 +672,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 next_run_ist = nr + timedelta(hours=5, minutes=30)
                 lines.append(f"     ⏭ Next run: `{next_run_ist.strftime('%H:%M:%S')}`")
         
-        if pool_len == 0 and running:
-            lines.append(f"    ⚠️ Warning: Pool is empty!")
+        if not has_message and running:
+            lines.append(f"    ⚠️ Warning: Source message is missing!")
 
     msg = "\n".join(lines)
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -647,73 +683,68 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================
 
 async def setgname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sabhhi groups ka naam ek saath badle (Usage: /setgname Naya Naam)"""
     if not is_admin(update): return
+    val = " ".join(context.args)
+    if not val: 
+        return await update.message.reply_text("❌ Usage: `/setgname Name` (Example: /setgname Bharat Goal)")
     
-    new_name = " ".join(context.args)
-    if not new_name:
-        return await update.message.reply_text("❌ Usage: `/setgname My New Group Name`", parse_mode="Markdown")
-
+    # Global lock update karein
+    config["locked_details"]["name"] = val
     success = 0
-    for gid in GROUP_IDS:
+    total = len(GROUP_IDS)
+    
+    status_msg = await update.message.reply_text(f"⏳ {total} groups ka naam update ho raha hai...")
+
+    for index, gid in enumerate(GROUP_IDS, start=1):
+        # Name with numbering (e.g., Bharat Goal 01)
+        numbered_name = f"{val} {index:02d}"
+        
+        # Specific group ke liye memory mein lock karein taaki monitor isi numbering ko restore kare
+        gid_str = str(gid)
+        if gid_str not in config["locked_details"]["groups"]:
+            config["locked_details"]["groups"][gid_str] = {}
+        config["locked_details"]["groups"][gid_str]["name"] = numbered_name
+
         try:
-            await context.bot.set_chat_title(chat_id=gid, title=new_name)
+            await context.bot.set_chat_title(chat_id=gid, title=numbered_name)
             success += 1
-            await asyncio.sleep(0.5) # Anti-flood delay
+            await asyncio.sleep(0.5) # Flood wait protection
         except Exception as e:
-            print(f"❌ Name change failed for {gid}: {e}")
+            print(f"❌ Failed to rename {gid}: {e}")
 
-    await update.message.reply_text(f"✅ {success} groups ka naam badal diya gaya.")
-
+    await status_msg.edit_text(f"✅ **Update Complete!**\n• {success} groups locked with numbering.\n• Format: `{val} 01`", parse_mode="Markdown")
 
 async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sabhi groups ka description badle (Usage: /setgdesc Nayi Jankari)"""
     if not is_admin(update): return
+    val = " ".join(context.args)
+    if not val: return await update.message.reply_text("❌ Usage: `/setgdesc Description`")
     
-    new_desc = " ".join(context.args)
-    if not new_desc:
-        return await update.message.reply_text("❌ Usage: `/setgdesc Naya Description Text`", parse_mode="Markdown")
-
+    config["locked_details"]["desc"] = val
     success = 0
     for gid in GROUP_IDS:
         try:
-            await context.bot.set_chat_description(chat_id=gid, description=new_desc)
+            await context.bot.set_chat_description(chat_id=gid, description=val)
             success += 1
             await asyncio.sleep(0.5)
-        except Exception as e:
-            print(f"❌ Description change failed for {gid}: {e}")
-
-    await update.message.reply_text(f"✅ {success} groups ka description update ho gaya.")
-
+        except: pass
+    await update.message.reply_text(f"✅ Description locked in {success} groups.")
 
 async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sabhi groups ki profile pic badle (Usage: Reply to a Photo with /setgpic)"""
     if not is_admin(update): return
-    
     if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        return await update.message.reply_text("❌ Kisi Photo par reply karke `/setgpic` likhein.")
+        return await update.message.reply_text("❌ Photo par reply karke `/setgpic` likhein.")
 
-    # Get the best quality photo
-    photo_file = await update.message.reply_to_message.photo[-1].get_file()
-    # Download locally temporarily
-    temp_path = "temp_pic.jpg"
-    await photo_file.download_to_drive(temp_path)
-
+    file_id = update.message.reply_to_message.photo[-1].file_id
+    config["locked_details"]["pic_file_id"] = file_id
+    
     success = 0
     for gid in GROUP_IDS:
         try:
-            with open(temp_path, 'rb') as photo:
-                await context.bot.set_chat_photo(chat_id=gid, photo=photo)
+            await context.bot.set_chat_photo(chat_id=gid, photo=file_id)
             success += 1
-            await asyncio.sleep(1.0) # Photo upload takes time, higher delay
-        except Exception as e:
-            print(f"❌ Photo change failed for {gid}: {e}")
-
-    # Remove temporary file
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
-
-    await update.message.reply_text(f"✅ {success} groups ki DP badal di gayi.")
+            await asyncio.sleep(1)
+        except: pass
+    await update.message.reply_text(f"✅ DP updated and locked in {success} groups.")
 
 # ================= MANUAL BROADCAST =================
 
@@ -863,16 +894,23 @@ def main():
 
     telegram_app.add_handler(CommandHandler("clearpool", clearpool))
     telegram_app.add_handler(CommandHandler("resetallpools", resetallpools))
+    
 
-    # Admin Commands
+    # 1. Anti-Change Monitor (Prioritize this)
+    telegram_app.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_TITLE | filters.StatusUpdate.NEW_CHAT_PHOTO, 
+        monitor_changes
+    ), group=-1) # Higher priority group
+
+    # 2. Admin Commands
     telegram_app.add_handler(CommandHandler("block", block_user))
     telegram_app.add_handler(CommandHandler("unblock", unblock_user))
     
-
-    # Auto-Delete Handler (Isse sabse niche rakhein)
-    from telegram.ext import MessageHandler, filters
-    telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, delete_spammer_message))
-
+    # 3. Auto-Delete Handler (Normal messages)
+    telegram_app.add_handler(MessageHandler(
+        filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL, 
+        delete_spammer_message
+    ))
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
 
