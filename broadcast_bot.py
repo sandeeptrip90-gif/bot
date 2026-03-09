@@ -38,7 +38,9 @@ print("Bot file loaded successfully")
 # =====================================================
 
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+# Purana ADMIN_ID hata kar ye paste karein
+raw_admins = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", "0"))
+ADMIN_IDS = [int(id.strip()) for id in raw_admins.split(",") if id.strip().isdigit()]
 
 # =====================================================
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
@@ -56,7 +58,7 @@ config = {
 }
 
 # How many independent jobs to support
-JOB_COUNT = 5
+JOB_COUNT = 10
 
 # Per-job storage template: jobs are keyed `job_1`..`job_5`.
 # Each job stores scheduling info and a rotating message pool.
@@ -133,8 +135,10 @@ def schedule_daily_job(context, job_name: str, hh: int, mm: int):
 # =====================================================
 # 🛡 HELPERS
 
+# Is function ko replace karein
 def is_admin(update: Update) -> bool:
-    return update.effective_user and update.effective_user.id == ADMIN_ID
+    # Ab ye check karega ki user_id ADMIN_IDS ki list mein hai ya nahi
+    return update.effective_user and update.effective_user.id in ADMIN_IDS
 
 
 def night_mode() -> bool:
@@ -160,6 +164,49 @@ def night_mode() -> bool:
 # =====================================================
 # 🔁 AUTO BROADCAST JOB (Modified with Logging)
 # =====================================================
+
+async def clearpool(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Specific Job ka pool delete karne ke liye (Usage: /clearpool 1)"""
+    if not is_admin(update):
+        return
+
+    try:
+        job_id = int(context.args[0])
+        if job_id < 1 or job_id > JOB_COUNT:
+            raise ValueError
+    except (IndexError, ValueError):
+        return await update.message.reply_text("❌ Usage: `/clearpool <id>` (Example: /clearpool 1)", parse_mode="Markdown")
+
+    name = f"job_{job_id}"
+    if name in config["jobs"]:
+        config["jobs"][name]["pool"] = []
+        config["jobs"][name]["pool_index"] = 0
+        # Agar pool khali ho jaye toh job ko pause karna safe rehta hai
+        config["jobs"][name]["is_active"] = False
+        
+        # Timer bhi hata dete hain taaki empty pool error na aaye
+        for j in context.application.job_queue.get_jobs_by_name(name):
+            j.schedule_removal()
+
+        await update.message.reply_text(f"🗑️ **Job {job_id} ka pool clear kar diya gaya hai.**\nAb ye job inactive hai.")
+    else:
+        await update.message.reply_text("❌ Invalid Job ID.")
+
+async def resetallpools(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saare 5 jobs ke pools ko ek saath saaf karne ke liye"""
+    if not is_admin(update):
+        return
+
+    for i in range(1, JOB_COUNT + 1):
+        name = f"job_{i}"
+        config["jobs"][name]["pool"] = []
+        config["jobs"][name]["pool_index"] = 0
+        config["jobs"][name]["is_active"] = False
+        
+        for j in context.application.job_queue.get_jobs_by_name(name):
+            j.schedule_removal()
+
+    await update.message.reply_text("🚨 **All Pools Cleared!**\nSaare jobs reset ho gaye hain aur automation band kar di gayi hai.")
 
 async def auto_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     # Timing check ke liye log
@@ -255,31 +302,39 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = (
-        "🛠 **BOT HELP MENU**\n\n"
-        "♻️ **Multi-Job Auto Broadcast** (5 Independent Jobs)\n"
-        "/setjob <id> <HH:MM> – Reply to a message to add it to Job <id>'s rotation and set a daily time (IST).\n"
-        "2️⃣ **Interval:** `/setjob 1 30` (Every 30 minutes repeatedly)\n"
-        "    Subsequent replies to the same job append to its pool; messages cycle every day.\n"
-        "/stopjob <id> – Stop (pause) Job <id>. Pool is retained.\n"
-        "/stopall – Stop all 5 jobs & disable auto broadcast.\n"
-        "/autooff – Alias for /stopall (kills all timers).\n"
-        "/settings <night_start> <night_end> – Set night hours (IST 0-23, use 0 0 to disable).\n"
-        "/status – Show all 5 jobs, scheduled time, pool size, next run, current IST time.\n\n"
-        "📢 **Manual Broadcast & Manage**\n"
-        "/broadcast – Reply to send message to all groups\n"
-        "/pin – Reply to send & pin message in all groups\n"
-        "/unpinall – Remove all pinned messages\n"
-        "/info – Show group names & member count\n"
-        "/stats – Show total groups\n\n"
-        "⏱ **Timing (IST)**\n"
-        "• All times are Indian Standard Time (UTC+5:30)\n"
-        "• Jobs skip during night mode\n"
-        "• Use /settings 0 0 to disable night mode\n\n"
-        "🤖 **Notes**\n"
-        "• 5 independent jobs, each with its own daily time and message pool.\n"
-        "• Pool messages rotate round‑robin every day.\n"
-        "• Bot must be admin in groups\n"
-        "• Supports text, photo, video, voice, files"
+        "👑 **Hanuman - ADMIN CONTROL PANEL**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        "🔄 **AUTOMATION (JOB SYSTEM)**\n"
+        "• `/setjob <id> <time/mins>`\n"
+        "  - *Daily (IST):* Reply to msg + `/setjob 1 08:30`\n"
+        "  - *Interval:* Reply to msg + `/setjob 1 45` (mins)\n"
+        "• `/stopjob <id>` - Pause a specific job\n"
+        "• `/autoon` - Resume all configured jobs\n"
+        "• `/stopall` - Global kill-switch for all timers\n"
+        "• `/status` - Check active timers & message pool\n\n"
+
+        "🗑️ **POOL MANAGEMENT**\n"
+        "• `/clearpool <id>` - Delete messages of Job <id>\n"
+        "• `/resetallpools` - Wipe all 5 job pools clean\n\n"
+        
+        "📢 **BROADCAST & ENGAGEMENT**\n"
+        "• `/broadcast` - Reply to msg to send in all groups\n"
+        "• `/pin` - Send and pin message everywhere\n"
+        "• `/unpinall` - Remove pins from all groups\n\n"
+        
+        "🏢 **GROUP MANAGEMENT**\n"
+        "• `/info` - List all groups with member count & links\n"
+        "• `/stats` - Total group count summary\n"
+        "• `/setgname <name>` - Update all group titles\n"
+        "• `/setgdesc <text>` - Update all descriptions\n"
+        "• `/setgpic` - Reply to photo to change all DPs\n\n"
+        
+        "⚙️ **SYSTEM SETTINGS**\n"
+        "• `/settings <start> <end>` - Night mode (e.g., `23 7`)\n"
+        "  - *Use `0 0` to disable Night Mode*\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 *Note: Use IST (Indian Standard Time) for all scheduling.*"
     )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -660,16 +715,43 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    text = "📊 Group Info\n\n"
-    for gid in GROUP_IDS:
+    status_msg = await update.message.reply_text("🔄 Groups ki jaankari fetch ho rahi hai, please wait...")
+    
+    text = "📂 **Hanuman - GROUP DIRECTORY**\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    success_count = 0
+    for index, gid in enumerate(GROUP_IDS, start=1):
         try:
             chat = await context.bot.get_chat(gid)
             members = await context.bot.get_chat_member_count(gid)
-            text += f"• {chat.title}: {members}\n"
-        except Exception:
-            text += f"• {gid}: ❌\n"
+            
+            # Link fetch karne ki koshish (Bot admin hona chahiye)
+            link = chat.invite_link
+            if not link:
+                try:
+                    link = await context.bot.export_chat_invite_link(gid)
+                except Exception:
+                    link = "Link Unavailable"
 
-    await update.message.reply_text(text)
+            # Professional formatting
+            text += f"{index:02d}. **{chat.title}**\n"
+            text += f"   👥 Members: `{members}`\n"
+            text += f"   🔗 [Join Group]({link})\n\n"
+            success_count += 1
+            
+            # Anti-flood delay
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            text += f"{index:02d}. ❌ ID: `{gid}`\n   Status: Access Denied/Not Admin\n\n"
+
+    text += "━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"✅ **Total Active Groups:** {success_count}/{len(GROUP_IDS)}\n"
+    text += f"🕒 **Last Updated:** {get_ist_now().strftime('%H:%M:%S')} IST"
+
+    # Purane status message ko delete karke final report bhejna
+    await status_msg.delete()
+    await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -711,6 +793,9 @@ def main():
     telegram_app.add_handler(CommandHandler("setgname", setgname))
     telegram_app.add_handler(CommandHandler("setgdesc", setgdesc))
     telegram_app.add_handler(CommandHandler("setgpic", setgpic))
+
+    telegram_app.add_handler(CommandHandler("clearpool", clearpool))
+    telegram_app.add_handler(CommandHandler("resetallpools", resetallpools))
 
     print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
     print(f"📌 Group IDs: {GROUP_IDS}")
