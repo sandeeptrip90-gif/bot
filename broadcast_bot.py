@@ -475,16 +475,16 @@ async def unblock_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- MAIN LOGIC (Ye har message ko check karega) ---
 async def delete_spammer_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agar message kisi blacklisted user ka hai, toh delete karein"""
-    if not update.effective_user: return
+    if not update.effective_user or not update.message: return
     
     user_id = update.effective_user.id
+    # Blacklist check
     if user_id in config.get("blacklist", []):
         try:
             await update.message.delete()
-            print(f"🗑️ Deleted message from blacklisted user: {user_id}")
+            print(f"🗑️ Spammer message deleted: {user_id}")
         except Exception as e:
-            print(f"❌ Delete failed (Bot might not be admin): {e}")
+            print(f"❌ Spammer Delete Error: {e}")
 
 async def setjob(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
@@ -903,17 +903,18 @@ def main():
     t_request = HTTPXRequest(connection_pool_size=20, read_timeout=60, write_timeout=60)
     telegram_app = Application.builder().token(TOKEN).request(t_request).build()
 
-    # --- HANDLERS SEQUENCE ---
-
-    # A. ANTI-CHANGE & MEETING MONITOR (Sabse Pehle - Priority Group -1)
-    # Isme NEW_CHAT_TITLE, PHOTO aur VIDEO_CHAT events ko monitor karenge
+   # GROUP -1: Security (Title, Photo, Video Chat)
+    # Isme hum StatusUpdate ke saare events ko catch karenge
     telegram_app.add_handler(MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_TITLE | 
-        filters.StatusUpdate.NEW_CHAT_PHOTO | 
-        filters.StatusUpdate.VIDEO_CHAT_STARTED | 
-        filters.StatusUpdate.VIDEO_CHAT_SCHEDULED, 
+        filters.StatusUpdate.ALL, 
         monitor_changes
     ), group=-1)
+
+    # GROUP 0: Standard Admin Commands
+    telegram_app.add_handler(CommandHandler("allow", allow_user))
+    telegram_app.add_handler(CommandHandler("remove", remove_user))
+    telegram_app.add_handler(CommandHandler("block", block_user))
+    telegram_app.add_handler(CommandHandler("unblock", unblock_user))
 
     # B. CORE ADMIN COMMANDS
     telegram_app.add_handler(CommandHandler("start", start))
@@ -941,17 +942,13 @@ def main():
     telegram_app.add_handler(CommandHandler("stats", stats))
     telegram_app.add_handler(CommandHandler("clearpool", clearpool))
     telegram_app.add_handler(CommandHandler("resetallpools", resetallpools))
-
-    # E. SPAM CONTROL
-    telegram_app.add_handler(CommandHandler("block", block_user))
-    telegram_app.add_handler(CommandHandler("unblock", unblock_user))
     
     # F. AUTO-DELETE HANDLER (Sabse Niche)
     # StatusUpdate.ALL ko exclude karna zaroori hai taaki Monitor trigger ho sake
     telegram_app.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL, 
+        filters.ALL & ~filters.COMMAND, 
         delete_spammer_message
-    ))
+    ), group=1)
 
     print(f"✅ Bot is running with {len(GROUP_IDS)} groups...")
     telegram_app.run_polling(drop_pending_updates=True)
