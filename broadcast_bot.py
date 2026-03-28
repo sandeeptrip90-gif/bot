@@ -48,7 +48,7 @@ ADMIN_IDS = [int(id.strip()) for id in raw_admins.split(",") if id.strip().isdig
 # 🧩 MANUAL GROUP IDS (ADD ALL GROUP IDS HERE)
 # =====================================================
 
-GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -1002295951659, -1002350372764, -1002408686476, -1002458796542, -1002459378218, -1001787331133, -1001797945922, -1001843610820, -1002052681893, -1002126246859, -1001509387207, -1001738062150, -1001587346978, -1001829615017, -1002083172621, -1002411884866, -1001567747819, -1002254648501, -1003366623406, -1002283304339, -4557532425, -1001637428890, -1002299671203, -1002568461287, -1002538473462, -1001646902169]
+GROUP_IDS = [-1002236012208, -1002417345407, -1002330831798, -1001882254820, -1002295951659, -1002350372764, -1002408686476, -1002458796542, -1002459378218, -1001787331133, -1001797945922, -1001843610820, -1002052681893, -1002126246859, -1001509387207, -1001738062150, -1001587346978, -1001829615017, -1002083172621, -1002411884866, -1001567747819, -1002254648501, -1003366623406, -1002283304339, -4557532425, -1001637428890, -1002299671203, -1002568461287, -1002538473462]
 
 # =====================================================
 # ⚙️ AUTO BROADCAST SETTINGS (IN-MEMORY, NO JSON)
@@ -68,6 +68,7 @@ config = {
     "night_end": 7,
     "is_active": False,
     "blacklist": [],
+    "whitelist": [],
     "locked_details": {
         "name": None,
         "desc": None,
@@ -134,37 +135,46 @@ def schedule_daily_job(context, job_name: str, hh: int, mm: int):
 async def monitor_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     
-    # Bot ke apne changes ko ignore karein taaki loop na bane
-    if update.effective_user.id == context.bot.id: return
+    # Bot ke apne actions ko ignore karein
+    if update.effective_user and update.effective_user.id == context.bot.id: 
+        return
     
     chat = update.effective_chat
-    gid = str(chat.id)
+    gid_str = str(chat.id)
     
-    # Agar change karne wala Admin nahi hai
+    # 🚫 VIDEO CHAT BLOCKER
+    if update.message.video_chat_started or update.message.video_chat_scheduled:
+        if not is_admin(update):
+            try:
+                await update.message.delete()
+                await context.bot.send_message(chat_id=chat.id, text="⚠️ Unauthorized Meeting Stopped.")
+                return 
+            except: pass
+
+    # 🛡️ REVERT UNAUTHORIZED CHANGES
     if not is_admin(update):
         ld = config.get("locked_details", {})
-        specific = ld.get("groups", {}).get(gid, {})
+        specific = ld.get("groups", {}).get(gid_str, {})
         
         target_name = specific.get("name") or ld.get("name")
-        target_desc = specific.get("desc") or ld.get("desc")
-        target_pic = specific.get("pic") or ld.get("pic_file_id")
+        target_desc = ld.get("desc")
+        target_pic = ld.get("pic_file_id")
 
         try:
-            # Revert Title
+            # Force Revert Name
             if update.message.new_chat_title and target_name:
                 await context.bot.set_chat_title(chat_id=chat.id, title=target_name)
             
-            # Revert Photo
+            # Force Revert Photo
             if update.message.new_chat_photo and target_pic:
                 await context.bot.set_chat_photo(chat_id=chat.id, photo=target_pic)
                 
-            # Revert Description
+            # Always Sync Description (Description change ka signal nahi milta, isliye har activity par sync)
             if target_desc:
                 await context.bot.set_chat_description(chat_id=chat.id, description=target_desc)
 
-            print(f"🛡️ Reverted unauthorized change in {gid}")
         except Exception as e:
-            print(f"❌ Revert error in {gid}: {e}")    
+            print(f"❌ Monitor Error in {gid_str}: {e}")
 
 # Developer notes — How to create new jobs
 # Option A — Use the built-in staggered auto jobs:
@@ -183,8 +193,9 @@ async def monitor_changes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Is function ko replace karein
 def is_admin(update: Update) -> bool:
-    # Ab ye check karega ki user_id ADMIN_IDS ki list mein hai ya nahi
-    return update.effective_user and update.effective_user.id in ADMIN_IDS
+    user_id = update.effective_user.id
+    # Check if user is Main Admin (from ENV) OR Whitelisted
+    return user_id in ADMIN_IDS or user_id in config.get("whitelist", [])
 
 
 def night_mode() -> bool:
@@ -210,6 +221,33 @@ def night_mode() -> bool:
 # =====================================================
 # 🔁 AUTO BROADCAST JOB (Modified with Logging)
 # =====================================================
+
+async def allow_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kisi user ko group details badalne ki permission dene ke liye"""
+    if not is_admin(update): return
+    try:
+        user_id = int(context.args[0])
+        if user_id not in config["whitelist"]:
+            config["whitelist"].append(user_id)
+            await update.message.reply_text(f"✅ User `{user_id}` ko whitelist kar diya gaya hai. Ab wo details badal sakta hai.")
+        else:
+            await update.message.reply_text("ℹ️ Ye user pehle se whitelist mein hai.")
+    except:
+        await update.message.reply_text("❌ Usage: `/allow <User_ID>`")
+
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Whitelist se user ko hatane ke liye"""
+    if not is_admin(update): return
+    try:
+        user_id = int(context.args[0])
+        if user_id in config["whitelist"]:
+            config["whitelist"].remove(user_id)
+            await update.message.reply_text(f"🚫 User `{user_id}` ki permission revoke kar di gayi hai.")
+        else:
+            await update.message.reply_text("❌ Ye user whitelist mein nahi hai.")
+    except:
+        await update.message.reply_text("❌ Usage: `/remove <User_ID>`")
+
 
 async def clearpool(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Legacy command: clear source message of a job (Usage: /clearpool 1)"""
@@ -366,9 +404,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/stopall` - Global kill-switch for all timers\n"
         "• `/status` - Check active timers & message setup\n\n"
 
-        "🚫 **SECURITY & ANTI-SPAM**\n"
-        "• `/block <user_id>` - Auto-delete user's messages\n"
-        "• `/unblock <user_id>` - Remove user from blacklist\n\n"
+        "🛡️ **SECURITY & GROUP LOCK**\n"
+        "• `/setgname <name>` : Sabhi groups mein numbering (01, 02...) ke saath name lock karein.\n"
+        "• `/setgdesc <text>` : Sabhi groups ka description (Bio) lock karein.\n"
+        "• `/setgpic` : Photo par reply karein DP lock karne ke liye.\n"
+        "• `/allow <ID>` : Kisi user ko whitelist karein (Permissions dena).\n"
+        "• `/remove <ID>` : Whitelist se user ko hatayein.\n\n"
 
         "🗑️ **JOB MESSAGE RESET**\n"
         "• `/clearpool <id>` - Clear source msg of Job <id>\n"
@@ -685,34 +726,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setgname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     val = " ".join(context.args)
-    if not val: 
-        return await update.message.reply_text("❌ Usage: `/setgname Name` (Example: /setgname Bharat Goal)")
+    if not val: return await update.message.reply_text("❌ Usage: `/setgname Name`")
     
-    # Global lock update karein
     config["locked_details"]["name"] = val
     success = 0
-    total = len(GROUP_IDS)
-    
-    status_msg = await update.message.reply_text(f"⏳ {total} groups ka naam update ho raha hai...")
-
-    for index, gid in enumerate(GROUP_IDS, start=1):
-        # Name with numbering (e.g., Bharat Goal 01)
-        numbered_name = f"{val} {index:02d}"
-        
-        # Specific group ke liye memory mein lock karein taaki monitor isi numbering ko restore kare
-        gid_str = str(gid)
-        if gid_str not in config["locked_details"]["groups"]:
-            config["locked_details"]["groups"][gid_str] = {}
-        config["locked_details"]["groups"][gid_str]["name"] = numbered_name
-
+    for gid in GROUP_IDS:
         try:
-            await context.bot.set_chat_title(chat_id=gid, title=numbered_name)
+            await context.bot.set_chat_title(chat_id=gid, title=val)
             success += 1
-            await asyncio.sleep(0.5) # Flood wait protection
-        except Exception as e:
-            print(f"❌ Failed to rename {gid}: {e}")
-
-    await status_msg.edit_text(f"✅ **Update Complete!**\n• {success} groups locked with numbering.\n• Format: `{val} 01`", parse_mode="Markdown")
+            await asyncio.sleep(0.5)
+        except: pass
+    await update.message.reply_text(f"✅ {success} groups updated & locked to: {val}")
 
 async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
@@ -727,24 +751,32 @@ async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success += 1
             await asyncio.sleep(0.5)
         except: pass
-    await update.message.reply_text(f"✅ Description locked in {success} groups.")
+    await update.message.reply_text(f"✅ Description forced in {success} groups.")
 
 async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        return await update.message.reply_text("❌ Photo par reply karke `/setgpic` likhein.")
-
-    file_id = update.message.reply_to_message.photo[-1].file_id
-    config["locked_details"]["pic_file_id"] = file_id
     
+    photo = None
+    if update.message.reply_to_message and update.message.reply_to_message.photo:
+        photo = update.message.reply_to_message.photo[-1].file_id
+    elif update.message.photo:
+        photo = update.message.photo[-1].file_id
+        
+    if not photo:
+        return await update.message.reply_text("❌ Photo par reply karein ya attach karein.")
+
+    config["locked_details"]["pic_file_id"] = photo
     success = 0
+    msg = await update.message.reply_text(f"⏳ {len(GROUP_IDS)} groups mein DP update ho rahi hai...")
+    
     for gid in GROUP_IDS:
         try:
-            await context.bot.set_chat_photo(chat_id=gid, photo=file_id)
+            await context.bot.set_chat_photo(chat_id=gid, photo=photo)
             success += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5) # Anti-flood delay
         except: pass
-    await update.message.reply_text(f"✅ DP updated and locked in {success} groups.")
+            
+    await msg.edit_text(f"✅ DP Locked in {success} groups.")
 
 # ================= MANUAL BROADCAST =================
 
@@ -862,66 +894,72 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================
 
 def main():
-    # 1. Web server start karein (Render ke liye zaroori)
+    # 1. Web server start (Render ke liye)
     start_web() 
     print("🌐 Web server started for Render Health Check")
 
-    print("⚙️ Initializing bot...")
-    
-    # 2. Variable ka naam 'telegram_app' hi rakhein
-    telegram_app = Application.builder().token(TOKEN).build()
+    # 2. Application Build with Network Resilience
+    from telegram.request import HTTPXRequest
+    t_request = HTTPXRequest(connection_pool_size=20, read_timeout=60, write_timeout=60)
+    telegram_app = Application.builder().token(TOKEN).request(t_request).build()
 
-    print("✅ Bot connected to Telegram")
+    # --- HANDLERS SEQUENCE ---
 
+    # A. ANTI-CHANGE & MEETING MONITOR (Sabse Pehle - Priority Group -1)
+    # Isme NEW_CHAT_TITLE, PHOTO aur VIDEO_CHAT events ko monitor karenge
+    telegram_app.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_TITLE | 
+        filters.StatusUpdate.NEW_CHAT_PHOTO | 
+        filters.StatusUpdate.VIDEO_CHAT_STARTED | 
+        filters.StatusUpdate.VIDEO_CHAT_SCHEDULED, 
+        monitor_changes
+    ), group=-1)
+
+    # B. CORE ADMIN COMMANDS
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("status", status))
+    telegram_app.add_handler(CommandHandler("settings", settings))
+
+    # C. GROUP LOCK COMMANDS (Force Update Logic)
+    telegram_app.add_handler(CommandHandler("setgname", setgname))
+    telegram_app.add_handler(CommandHandler("setgdesc", setgdesc))
+    telegram_app.add_handler(CommandHandler("setgpic", setgpic))
+    telegram_app.add_handler(CommandHandler("allow", allow_user))
+    telegram_app.add_handler(CommandHandler("remove", remove_user))
+
+    # D. BROADCAST & POOL SYSTEM
     telegram_app.add_handler(CommandHandler("setjob", setjob))
     telegram_app.add_handler(CommandHandler("stopjob", stopjob))
     telegram_app.add_handler(CommandHandler("autoon", autoon))
     telegram_app.add_handler(CommandHandler("autooff", autooff))
     telegram_app.add_handler(CommandHandler("stopall", stopall))
-    telegram_app.add_handler(CommandHandler("settings", settings))
-    telegram_app.add_handler(CommandHandler("status", status))
-
     telegram_app.add_handler(CommandHandler("broadcast", broadcast))
     telegram_app.add_handler(CommandHandler("pin", pin))
     telegram_app.add_handler(CommandHandler("unpinall", unpinall))
     telegram_app.add_handler(CommandHandler("info", info))
     telegram_app.add_handler(CommandHandler("stats", stats))
-    telegram_app.add_handler(CommandHandler("setgname", setgname))
-    telegram_app.add_handler(CommandHandler("setgdesc", setgdesc))
-    telegram_app.add_handler(CommandHandler("setgpic", setgpic))
-
     telegram_app.add_handler(CommandHandler("clearpool", clearpool))
     telegram_app.add_handler(CommandHandler("resetallpools", resetallpools))
-    
 
-    # 1. Anti-Change Monitor (Prioritize this)
-    telegram_app.add_handler(MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_TITLE | filters.StatusUpdate.NEW_CHAT_PHOTO, 
-        monitor_changes
-    ), group=-1) # Higher priority group
-
-    # 2. Admin Commands
+    # E. SPAM CONTROL
     telegram_app.add_handler(CommandHandler("block", block_user))
     telegram_app.add_handler(CommandHandler("unblock", unblock_user))
     
-    # 3. Auto-Delete Handler (Normal messages)
+    # F. AUTO-DELETE HANDLER (Sabse Niche)
+    # StatusUpdate.ALL ko exclude karna zaroori hai taaki Monitor trigger ho sake
     telegram_app.add_handler(MessageHandler(
         filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL, 
         delete_spammer_message
     ))
-    print(f"📌 Total groups loaded: {len(GROUP_IDS)}")
-    print(f"📌 Group IDs: {GROUP_IDS}")
 
-    print("🤖 Bot is running...")
+    print(f"✅ Bot is running with {len(GROUP_IDS)} groups...")
     telegram_app.run_polling(drop_pending_updates=True)
 
 
 # 🔥🔥🔥 YAHAN LIKHNA HAI — FILE KE BILKUL END ME 🔥🔥🔥
 if __name__ == "__main__":
     main()
-
 
 
 
