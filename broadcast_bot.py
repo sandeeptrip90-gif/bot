@@ -724,20 +724,38 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================
 
 async def setgname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    val = " ".join(context.args)
-    if not val: return await update.message.reply_text("❌ Usage: `/setgname Name`")
-    
-    config["locked_details"]["name"] = val
-    success = 0
-    for gid in GROUP_IDS:
-        try:
-            await context.bot.set_chat_title(chat_id=gid, title=val)
-            success += 1
-            await asyncio.sleep(0.5)
-        except: pass
-    await update.message.reply_text(f"✅ {success} groups updated & locked to: {val}")
+    if not is_admin(update):
+        return
 
+    base_name = " ".join(context.args)
+
+    if not base_name:
+        return await update.message.reply_text(
+            "❌ Usage: /setgname Group Name"
+        )
+
+    config["locked_details"]["name"] = base_name
+
+    success = 0
+
+    for index, gid in enumerate(GROUP_IDS, start=1):
+        try:
+            group_name = f"{index:02d}. {base_name}"
+
+            await context.bot.set_chat_title(
+                chat_id=gid,
+                title=group_name
+            )
+
+            success += 1
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            print(f"Name update failed {gid}: {e}")
+
+    await update.message.reply_text(
+        f"✅ Serial numbering updated in {success} groups."
+    )
 async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
     val = " ".join(context.args)
@@ -754,29 +772,52 @@ async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Description forced in {success} groups.")
 
 async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    
+    if not is_admin(update):
+        return
+
     photo = None
+
     if update.message.reply_to_message and update.message.reply_to_message.photo:
         photo = update.message.reply_to_message.photo[-1].file_id
+
     elif update.message.photo:
         photo = update.message.photo[-1].file_id
-        
+
     if not photo:
-        return await update.message.reply_text("❌ Photo par reply karein ya attach karein.")
+        return await update.message.reply_text(
+            "❌ Photo par reply karein ya attach karein."
+        )
+
+    print("📸 PHOTO FILE ID:", photo)
 
     config["locked_details"]["pic_file_id"] = photo
+
     success = 0
-    msg = await update.message.reply_text(f"⏳ {len(GROUP_IDS)} groups mein DP update ho rahi hai...")
-    
+    failed = 0
+
+    msg = await update.message.reply_text(
+        f"⏳ {len(GROUP_IDS)} groups mein DP update ho rahi hai..."
+    )
+
     for gid in GROUP_IDS:
         try:
-            await context.bot.set_chat_photo(chat_id=gid, photo=photo)
+            await context.bot.set_chat_photo(
+                chat_id=gid,
+                photo=photo
+            )
+
             success += 1
-            await asyncio.sleep(1.5) # Anti-flood delay
-        except: pass
-            
-    await msg.edit_text(f"✅ DP Locked in {success} groups.")
+            print(f"✅ DP Updated: {gid}")
+
+        except Exception as e:
+            failed += 1
+            print(f"❌ DP Failed {gid}: {e}")
+
+        await asyncio.sleep(1.5)
+
+    await msg.edit_text(
+        f"✅ Success: {success}\n❌ Failed: {failed}"
+    )
 
 # ================= MANUAL BROADCAST =================
 
