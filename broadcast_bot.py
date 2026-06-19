@@ -775,49 +775,79 @@ async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    photo = None
+    photo_file_id = None
 
-    if update.message.reply_to_message and update.message.reply_to_message.photo:
-        photo = update.message.reply_to_message.photo[-1].file_id
-
-    elif update.message.photo:
-        photo = update.message.photo[-1].file_id
-
-    if not photo:
-        return await update.message.reply_text(
-            "❌ Photo par reply karein ya attach karein."
+    # Reply photo
+    if (
+        update.message.reply_to_message
+        and update.message.reply_to_message.photo
+    ):
+        photo_file_id = (
+            update.message.reply_to_message.photo[-1].file_id
         )
 
-    print("📸 PHOTO FILE ID:", photo)
+    # Direct uploaded photo with command caption
+    elif update.message.photo:
+        photo_file_id = update.message.photo[-1].file_id
 
-    config["locked_details"]["pic_file_id"] = photo
+    if not photo_file_id:
+        return await update.message.reply_text(
+            "❌ Photo par reply karein ya photo ke saath command bhejein."
+        )
 
-    success = 0
-    failed = 0
+    try:
+        # Save lock
+        config["locked_details"]["pic_file_id"] = photo_file_id
 
-    msg = await update.message.reply_text(
-        f"⏳ {len(GROUP_IDS)} groups mein DP update ho rahi hai..."
-    )
+        # Download photo once
+        tg_file = await context.bot.get_file(photo_file_id)
 
-    for gid in GROUP_IDS:
-        try:
-            await context.bot.set_chat_photo(
-                chat_id=gid,
-                photo=photo
-            )
+        photo_bytes = await tg_file.download_as_bytearray()
 
-            success += 1
-            print(f"✅ DP Updated: {gid}")
+        success = 0
+        failed = 0
 
-        except Exception as e:
-            failed += 1
-            print(f"❌ DP Failed {gid}: {e}")
+        msg = await update.message.reply_text(
+            f"⏳ Updating DP in {len(GROUP_IDS)} groups..."
+        )
 
-        await asyncio.sleep(1.5)
+        print("📸 Starting group photo update...")
+        print(f"📌 Total Groups: {len(GROUP_IDS)}")
 
-    await msg.edit_text(
-        f"✅ Success: {success}\n❌ Failed: {failed}"
-    )
+        for gid in GROUP_IDS:
+            try:
+                await context.bot.set_chat_photo(
+                    chat_id=gid,
+                    photo=photo_bytes
+                )
+
+                success += 1
+
+                print(
+                    f"✅ DP Updated | Group: {gid}"
+                )
+
+            except Exception as e:
+                failed += 1
+
+                print(
+                    f"❌ DP Failed | Group: {gid} | Error: {e}"
+                )
+
+            await asyncio.sleep(1.5)
+
+        await msg.edit_text(
+            f"✅ DP Update Complete\n\n"
+            f"Success: {success}\n"
+            f"Failed: {failed}"
+        )
+
+    except Exception as e:
+        print(f"❌ setgpic Fatal Error: {e}")
+
+        await update.message.reply_text(
+            f"❌ Error:\n{e}"
+        )
 
 # ================= MANUAL BROADCAST =================
 
