@@ -11,6 +11,8 @@ from flask import Flask
 from threading import Thread
 import os
 from telegram.ext import MessageHandler, filters # Ye line script ke top par honi chahiye
+import tempfile
+import asyncio
 
 flask_app = Flask(__name__)
 
@@ -771,6 +773,7 @@ async def setgdesc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
     await update.message.reply_text(f"✅ Description forced in {success} groups.")
 
+
 async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
@@ -786,23 +789,25 @@ async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message.reply_to_message.photo[-1].file_id
         )
 
-    # Direct uploaded photo with command caption
+    # Direct uploaded photo
     elif update.message.photo:
-        photo_file_id = update.message.photo[-1].file_id
+        photo_file_id = (
+            update.message.photo[-1].file_id
+        )
 
     if not photo_file_id:
         return await update.message.reply_text(
-            "❌ Photo par reply karein ya photo ke saath command bhejein."
+            "❌ Reply to a photo or send a photo with /setgpic"
         )
 
     try:
+        print(f"📸 PHOTO FILE ID: {photo_file_id}")
+
         # Save lock
         config["locked_details"]["pic_file_id"] = photo_file_id
 
-        # Download photo once
+        # Download Telegram file
         tg_file = await context.bot.get_file(photo_file_id)
-
-        photo_bytes = await tg_file.download_as_bytearray()
 
         success = 0
         failed = 0
@@ -811,30 +816,46 @@ async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ Updating DP in {len(GROUP_IDS)} groups..."
         )
 
-        print("📸 Starting group photo update...")
-        print(f"📌 Total Groups: {len(GROUP_IDS)}")
+        # Download once to temp file
+        with tempfile.NamedTemporaryFile(
+            suffix=".jpg",
+            delete=False
+        ) as temp_file:
 
+            await tg_file.download_to_drive(
+                custom_path=temp_file.name
+            )
+
+            temp_path = temp_file.name
+
+        print(f"📂 Temp File: {temp_path}")
+
+        # Update all groups
         for gid in GROUP_IDS:
+
             try:
-                await context.bot.set_chat_photo(
-                    chat_id=gid,
-                    photo=photo_bytes
-                )
+                with open(temp_path, "rb") as photo:
+
+                    await context.bot.set_chat_photo(
+                        chat_id=gid,
+                        photo=photo
+                    )
 
                 success += 1
 
                 print(
-                    f"✅ DP Updated | Group: {gid}"
+                    f"✅ DP Updated: {gid}"
                 )
 
             except Exception as e:
+
                 failed += 1
 
                 print(
-                    f"❌ DP Failed | Group: {gid} | Error: {e}"
+                    f"❌ DP Failed {gid}: {e}"
                 )
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
 
         await msg.edit_text(
             f"✅ DP Update Complete\n\n"
@@ -843,7 +864,8 @@ async def setgpic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception as e:
-        print(f"❌ setgpic Fatal Error: {e}")
+
+        print(f"❌ Fatal Error: {e}")
 
         await update.message.reply_text(
             f"❌ Error:\n{e}"
